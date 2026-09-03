@@ -1,5 +1,5 @@
 """
-  Your SoC EKF, generalized:
+  SoC EKF, generalized:
   - State: SoC
   - Input (drives prediction): current, via Coulomb counting — SoC_k+1 =
     SoC_k + (I/Q)*dt
@@ -21,38 +21,57 @@ the hypothesized orietnation you're comparing accel/mag against is the gyro's me
   """
 
 import time
+import math
 
 #variable definition
 weight = 0.98 #weight for complementary filter, how much to trust gyro vs accel/mag
 
-gyro = 0
-accel = 0
-mag = 0
+#measurement variables
+gyro_x_dps = 0 #raw gyro constants, in deg/s - never overwritten by the loop
+gyro_y_dps = 0
+gyro_z_dps = 0
+accel_x = 0
+accel_y = math.sin(math.radians(10)) #simulate 10 deg roll
+accel_z = math.cos(math.radians(10)) #simulate 10 deg roll
+mag_x = 1.0
+mag_y = 0
+mag_z = 0
 
+#guessing variables
+accel_roll = 0
+accel_pitch = 0
+accel_yaw = 0
+
+#state variables
 roll = 0
 pitch = 0
 yaw = 0
 
 last_time = time.time()
 
-
 #sub functions to find variables for loop
 def get_gyro():
+    #raw values are in deg/s, convert to rad/s before returning
 
-    return gyro_x, gyro_y, gyro_z
+    return math.radians(gyro_x_dps), math.radians(gyro_y_dps), math.radians(gyro_z_dps)
 
 def get_accel():
 
+    return accel_x, accel_y, accel_z
+
 def get_mag():
-    s
+    return mag_x, mag_y, mag_z
 
 #main loop
 while True:
 
     #read gyro, mag, accel
     gyro_x, gyro_y, gyro_z = get_gyro()
-    mag_cur = get_mag()
-    accel_cur = get_accel()
+    mag_x, mag_y, mag_z = get_mag()
+    accel_x, accel_y, accel_z = get_accel()
+
+    mag_x_compensated = mag_x * math.cos(pitch) + mag_y * math.sin(roll) * math.sin(pitch) + mag_z * math.cos(roll) * math.sin(pitch)
+    mag_y_compensated = mag_y * math.cos(roll) - mag_z * math.sin(roll)
 
     #predict: integrate gyro into current angle estimation
     now = time.time()
@@ -68,11 +87,19 @@ while True:
     yaw += gyro_z * dt
 
     #compute accel based roll/pitch and mag based yaw independently
+    accel_roll = math.atan2(accel_y, accel_z)
+    accel_pitch = math.atan2(-accel_x, math.sqrt(accel_y**2 + accel_z**2))
+    accel_yaw = math.atan2(mag_y_compensated, mag_x_compensated)
 
     #blend prediction with those (complementary filter) 
     #later this is kalman gain update step
     roll = (weight) * roll + (1 - weight) * accel_roll
+    pitch = (weight) * pitch + (1 - weight) * accel_pitch
+    yaw = (weight) * yaw + (1 - weight) * accel_yaw
+
+    print("roll: ", math.degrees(roll), "pitch: ", math.degrees(pitch), "yaw: ", math.degrees(yaw))
 
     #store result as new "current angle estimate" for next loop
 
     last_time = now
+    time.sleep(0.5) #sleep for 500ms to simulate sensor reading rate
