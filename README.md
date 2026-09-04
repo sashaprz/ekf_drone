@@ -10,3 +10,13 @@ Attitude estimation for a drone from gyro + accelerometer + magnetometer — thr
 | Converged roll (true: 10°) | ~12.6–12.7° | ~10.14° | ~10.03° |
 | Converged pitch (true: 0°) | n/a (no coupling) | ~4.8° | ~0.017° |
 | Converged yaw (true: 0°) | n/a (no coupling) | ~0.86° | ~0.003° |
+
+## Dynamic trajectory test
+
+The results above all use a **static** test: a fixed 10° tilt and a constant gyro rate. That's enough to check whether a filter settles near the right number, but it can't test whether a filter *tracks a moving target* — a static pose has no time-varying truth to compare against, so a filter that's actually broken (e.g. correcting toward the wrong sign) can still look fine if it happens to sit near the right value.
+
+`ekf.py` now generates a moving ground-truth trajectory instead: `roll`/`pitch`/`yaw` each follow a sine wave (different amplitude, frequency, and phase per axis), with known analytic derivatives. Gyro, accel, and mag readings are synthesized from that true trajectory each iteration — gyro via the inverse of the body-rate/world-rate kinematics (true rate → simulated body rate), accel and mag via the same rotation-based formulas used elsewhere in the filter — each with realistic bias (gyro only) and Gaussian noise added on top. The true value is printed alongside the estimate every iteration, so tracking error is measured directly instead of eyeballed.
+
+This setup caught a real bug the static test couldn't have: `get_mag`'s yaw sign convention was backwards (derived from a rotation matrix with the opposite handedness from the rest of the codebase), which the static test's fixed accel/mag readings never exercised — it only showed up as steadily growing yaw error once yaw was actually moving.
+
+**Performance after fixing that bug**, roll/pitch/yaw tracking error settles to roughly **±0.3–0.5°** throughout the run, rather than diverging — confirming the filter is genuinely tracking the moving trajectory, not just parked near a static answer.

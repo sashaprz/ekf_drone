@@ -50,6 +50,27 @@ bias_x = 0
 bias_y = 0
 bias_z = 0
 
+#oscillation constants
+amplitude_roll = math.radians(15)  # how far the oscillation swings,in radians
+freq_roll = 0.5                    # how fast it oscillates, in rad/s
+phase_roll = 0                     # phase offset for roll oscillation
+
+amplitude_pitch = math.radians(10) # how far the oscillation swings, in radians
+freq_pitch = 0.3                   # how fast it oscillates, in rad/s
+phase_pitch = math.pi/2            # phase offset for pitch oscillation
+
+amplitude_yaw = math.radians(5)    # how far the oscillation swings, in radians
+freq_yaw = 0.1                     # how fast it oscillates, in rad/s
+phase_yaw = math.pi                  # phase offset for yaw oscillation
+
+#adding noise for sim
+true_bias_x = math.radians(2)
+true_bias_y = math.radians(-1)
+true_bias_z = math.radians(0.5)
+gyro_noise_std = math.radians(0.5)
+accel_noise_std = 0.02
+mag_noise_std = 0.01
+
 #dynamically update weighting
 P = np.eye(6) #how uncertain you currently are about each state, and how uncertainties are correlated
 Q = np.diag([0.01, 0.01, 0.01, 1e-6, 1e-6, 1e-6]) #how much new uncertainty is added by the prediction step (how uncertain you are abt gyro)
@@ -61,19 +82,32 @@ I = np.eye(6) #identity matrix for updating the covariance
 H = np.zeros((4, 6)) #measurement matrix, how the measurements relate to the state
 
 last_time = time.time()
+start_time = time.time()
 
 #sub functions to find variables for loop
-def get_gyro():
-    #raw values are in deg/s, convert to rad/s before returning
+def get_gyro(t):
+    simulated_gyro_x = true_roll_dot(t) - true_yaw_dot(t) * math.sin(true_pitch(t))
+    simulated_gyro_y = true_pitch_dot(t) * math.cos(true_roll(t)) + true_yaw_dot(t) * math.sin(true_roll(t)) * math.cos(true_pitch(t))
+    simulated_gyro_z = -true_pitch_dot(t) * math.sin(true_roll(t)) + true_yaw_dot(t) * math.cos(true_roll(t)) * math.cos(true_pitch(t))
+    return (simulated_gyro_x + true_bias_x + np.random.normal(0, gyro_noise_std),
+            simulated_gyro_y + true_bias_y + np.random.normal(0, gyro_noise_std),
+            simulated_gyro_z + true_bias_z + np.random.normal(0, gyro_noise_std))
 
-    return math.radians(gyro_x_dps), math.radians(gyro_y_dps), math.radians(gyro_z_dps)
+def get_accel(t):
+    true_ax = -math.sin(true_pitch(t))
+    true_ay = math.sin(true_roll(t)) * math.cos(true_pitch(t))
+    true_az = math.cos(true_roll(t)) * math.cos(true_pitch(t))
+    return (true_ax + np.random.normal(0, accel_noise_std),
+              true_ay + np.random.normal(0, accel_noise_std),
+              true_az + np.random.normal(0, accel_noise_std))
 
-def get_accel():
-
-    return accel_x, accel_y, accel_z
-
-def get_mag():
-    return mag_x, mag_y, mag_z
+def get_mag(t):
+    true_mx = math.cos(true_yaw(t)) * math.cos(true_pitch(t))
+    true_my = math.sin(true_roll(t)) * math.sin(true_pitch(t)) * math.cos(-true_yaw(t)) - math.cos(true_roll(t)) * math.sin(-true_yaw(t))
+    true_mz = math.sin(-true_yaw(t)) * math.sin(true_roll(t)) + math.cos(-true_yaw(t)) * math.cos(true_roll(t)) * math.sin(true_pitch(t))
+    return (true_mx + np.random.normal(0, mag_noise_std),
+            true_my + np.random.normal(0, mag_noise_std),
+            true_mz + np.random.normal(0, mag_noise_std))
 
 def update_F(pitch_dot, pitch, yaw_dot, dt, roll, F):
     #F is a matrix of partial derivatives - a Jacobian
@@ -106,13 +140,34 @@ def update_H(roll, pitch):
     H[3] = [0, 0, 1, 0, 0, 0]
     return H
 
+def true_roll(t):
+    return amplitude_roll * math.sin(freq_roll * t)
+
+def true_roll_dot(t):
+    return amplitude_roll * freq_roll * math.cos(freq_roll * t)
+
+def true_pitch(t):
+    return amplitude_pitch * math.sin(freq_pitch * t + phase_pitch)
+
+def true_pitch_dot(t):
+    return amplitude_pitch * freq_pitch * math.cos(freq_pitch * t + phase_pitch)
+
+def true_yaw(t):
+    return amplitude_yaw * math.sin(freq_yaw * t + phase_yaw)
+
+def true_yaw_dot(t):
+    return amplitude_yaw * freq_yaw * math.cos(freq_yaw * t + phase_yaw)
+
 #main loop
 while True:
 
+    now = time.time()
+    t = now - start_time
+
     #read gyro, mag, accel
-    gyro_x, gyro_y, gyro_z = get_gyro()
-    mag_x, mag_y, mag_z = get_mag()
-    accel_x, accel_y, accel_z = get_accel()
+    gyro_x, gyro_y, gyro_z = get_gyro(t)
+    mag_x, mag_y, mag_z = get_mag(t)
+    accel_x, accel_y, accel_z = get_accel(t)
 
     mag_x_compensated = mag_x * math.cos(pitch) + mag_y * math.sin(roll) * math.sin(pitch) + mag_z * math.cos(roll) * math.sin(pitch)
     mag_y_compensated = mag_y * math.cos(roll) - mag_z * math.sin(roll)
@@ -122,7 +177,6 @@ while True:
     corrected_gyro_z = gyro_z - bias_z
 
     #predict: integrate gyro into current angle estimation
-    now = time.time()
     dt = now - last_time #sampling as fast as the hardware can handle
 
     #youre just adding how fastyou've moved multiplied by how long you moved it
@@ -168,7 +222,13 @@ while True:
 
     roll, pitch, yaw, bias_x, bias_y, bias_z = corrected_state
     
-    print("roll: ", math.degrees(roll), "pitch: ", math.degrees(pitch), "yaw: ", math.degrees(yaw))
+    roll_error = math.degrees(roll) - math.degrees(true_roll(t))
+    pitch_error = math.degrees(pitch) - math.degrees(true_pitch(t))
+    yaw_error = math.degrees(yaw) - math.degrees(true_yaw(t))
+
+    print("roll: ", math.degrees(roll), "(true: ", math.degrees(true_roll(t)), " err: ", roll_error, ")",
+          "pitch: ", math.degrees(pitch), "(true: ", math.degrees(true_pitch(t)), " err: ", pitch_error, ")",
+          "yaw: ", math.degrees(yaw), "(true: ", math.degrees(true_yaw(t)), " err: ", yaw_error, ")")
 
     last_time = now
     time.sleep(0.01) #sleep for 10ms to simulate sensor reading rate
