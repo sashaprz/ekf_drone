@@ -44,3 +44,16 @@ All three filters run against identical trajectory + sensor stream (same RNG see
 | 10x larger | Raw-vector + bias | 0.449° | 0.308° | 0.229° |
 
 Complementary is already visibly worse at original bias (fixed weight, no computed gain), and falls apart at 10x bias (roll RMS 9.6°) while both EKFs stay well-behaved — raw-vector+bias barely moves at all, since it's actively canceling the bias rather than just tolerating it.
+
+## Motion robustness: adaptive R + gating (`ekf.py`, `test_gating.py`)
+
+`ekf.py` now inflates accel's measurement noise (`R_accel`) when the raw accel magnitude deviates from 1g (real acceleration, not just tilt), and gates out (fully rejects) any accel reading too implausible to trust at all — a chi-squared test on the residual, 3 DOF.
+
+`test_gating.py` injects a physically-absurd accel spike (~8.7g) for 10 iterations and compares roll with gating on vs. off:
+
+| | Roll before spike | Max roll during spike | Recovery |
+|---|---|---|---|
+| Without gating | 10.06° | 32.07° | ~30+ iterations |
+| With gating | 10.06° | 10.28° | Immediate |
+
+Gating only works because it checks the residual against the *base* noise, not the already-inflated adaptive `R` — gating against the inflated value let the spike pass every time (adaptive `R` grows in lockstep with the outlier, so the Mahalanobis distance never crosses the threshold no matter how extreme the reading is).

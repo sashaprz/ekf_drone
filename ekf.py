@@ -25,6 +25,8 @@ import math
 import numpy as np
 
 #variable definition
+k = 1 #how agressively to increase accel measurement noise when drone is accelerating.
+chi2_threshold = 11.34 #chi2 threshold for 3 DOF, 99% confidence interval
 
 #measurement variables
 gyro_x_dps = 5 #raw gyro constants, in deg/s - never overwritten by the loop
@@ -48,8 +50,8 @@ bias_z = 0
 #dynamically update weighting
 P = np.eye(6) #how uncertain you currently are about each state, and how uncertainties are correlated
 Q = np.diag([0.01, 0.01, 0.01, 1e-6, 1e-6, 1e-6]) #how much new uncertainty is added by the prediction step (how uncertain you are abt gyro)
-R = np.diag([0.1, 0.1, 0.1, 0.1, 0.1, 0.1]) #how much uncertainty is added by the measurement step (how uncertain you are abt accel/mag)
-K = np.zeros((6, 6)) #how much to trust the measurement vs the prediction, kalman gain
+R_accel_base = np.diag([0.1, 0.1, 0.1]) #how much uncertainty is added by the measurement step (how uncertain you are abt accel/mag)
+R_mag = np.diag([0.1, 0.1, 0.1]) #how much uncertainty is added by the measurement step (how uncertain you are abt accel/mag)
 
 F = np.eye(6) #state transition matrix, how the state evolves from one step to the next without control input (identity for this case)
 I = np.eye(6) #identity matrix for updating the covariance
@@ -116,6 +118,11 @@ while True:
     mag_x, mag_y, mag_z = get_mag()
     accel_x, accel_y, accel_z = get_accel()
 
+    #if this is more than one, it means the drone is accelerating and therefore it's not reliable because its no longer just gravity
+    accel_magnitude = math.sqrt(accel_x**2 + accel_y**2 + accel_z**2)
+    deviation = abs(accel_magnitude - 1.0) #how far off from 1g is the accel reading?
+    R_accel = R_accel_base * (1 + k * deviation ** 2) #increase accel measurement noise if drone is accelerating
+
     corrected_gyro_x = gyro_x - bias_x
     corrected_gyro_y = gyro_y - bias_y  
     corrected_gyro_z = gyro_z - bias_z
@@ -139,33 +146,54 @@ while True:
     pitch_dot = corrected_gyro_y * math.cos(roll) - corrected_gyro_z * math.sin(roll)
     yaw_dot = (corrected_gyro_y * math.sin(roll) + corrected_gyro_z * math.cos(roll)) / math.cos(pitch)
 
-    # Update the state transition matrix based on the current state and time step
-    F = update_F(pitch_dot, pitch, yaw_dot, dt, roll, F)
-    H = update_H(roll, pitch, yaw)
-
     roll += roll_dot * dt
     pitch += pitch_dot * dt
     yaw += yaw_dot * dt
 
+    # Update the state transition matrix based on the current state and time step
+    F = update_F(pitch_dot, pitch, yaw_dot, dt, roll, F)
+    H = update_H(roll, pitch, yaw)
+
+    P = F @ P @ F.T + Q
+
     predicted_accel = np.array([-math.sin(pitch), math.sin(roll)*math.cos(pitch), math.cos(roll)*math.cos(pitch)])
     predicted_mag = np.array([math.cos(pitch)*math.cos(yaw),
-                               math.sin(roll)*math.sin(pitch)*math.cos(yaw) - math.cos(roll)*math.sin(yaw),
-                               math.cos(roll)*math.sin(pitch)*math.cos(yaw) + math.sin(roll)*math.sin(yaw)])
+                                math.sin(roll)*math.sin(pitch)*math.cos(yaw) - math.cos(roll)*math.sin(yaw),
+                                math.cos(roll)*math.sin(pitch)*math.cos(yaw) + math.sin(roll)*math.sin(yaw)])
 
-    #predict covariance, then compute gain (canonical order: predict state/cov -> gain -> correct state -> correct cov)
-    P = F @ P @ F.T + Q
-    K = P @ H.T @ np.linalg.inv(H @ P @ H.T + R)
+    state = np.array([roll, pitch, yaw, bias_x, bias_y, bias_z])
+    H_accel = H[0:3, :]
 
-    measurement_vector = np.array([accel_x, accel_y, accel_z, mag_x, mag_y, mag_z])
-    predicted_state = np.array([roll, pitch, yaw, bias_x, bias_y, bias_z])
-    predicted_measurement = np.concatenate([predicted_accel, predicted_mag])
-    residual =  measurement_vector - predicted_measurement
+    S_accel = H_accel @ P @ H_accel.T + R_accel
+    K_accel = P @ H_accel.T @ np.linalg.inv(S_accel)
+    residual_accel = np.array([accel_x, accel_y, accel_z]) - predicted_accel
 
-    corrected_state = predicted_state + K @ residual
-    P = (I - K @ H) @ P
+    #gate against BASE noise, not the already-inflated adaptive R_accel - otherwise
+    #adaptive R inflates in lockstep with the residual and the gate can never fire
+    #(d_squared asymptotes to ~1/k for large outliers regardless of severity)
+    S_accel_gate = H_accel @ P @ H_accel.T + R_accel_base
+    d_squared = residual_accel.T @ np.linalg.inv(S_accel_gate) @ residual_accel
 
-    roll, pitch, yaw, bias_x, bias_y, bias_z = corrected_state
-    
+    if d_squared <= chi2_threshold:
+      state = state + K_accel @ residual_accel
+      P = (I - K_accel @ H_accel) @ P
+    #else: skip entirely - state and P stay exactly as the predict step left them
+
+    roll, pitch, yaw, bias_x, bias_y, bias_z = state
+
+    update_H(roll, pitch, yaw)
+    predicted_mag = np.array([math.cos(pitch)*math.cos(yaw),
+                                    math.sin(roll)*math.sin(pitch)*math.cos(yaw) - math.cos(roll)*math.sin(yaw),
+                                    math.cos(roll)*math.sin(pitch)*math.cos(yaw) + math.sin(roll)*math.sin(yaw)])
+
+    H_mag = H[3:]
+    K_mag = P @ H_mag.T @ np.linalg.inv(H_mag @ P @ H_mag.T + R_mag)
+    residual_mag = np.array([mag_x, mag_y, mag_z]) - predicted_mag
+    state = state + K_mag @ residual_mag
+    P = (I - K_mag @ H_mag) @ P
+
+    roll, pitch, yaw, bias_x, bias_y, bias_z = state
+
     print("roll: ", math.degrees(roll), "pitch: ", math.degrees(pitch), "yaw: ", math.degrees(yaw))
 
     last_time = now
