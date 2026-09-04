@@ -46,16 +46,19 @@ accel_yaw = 0
 roll = 0
 pitch = 0
 yaw = 0
+bias_x = 0
+bias_y = 0
+bias_z = 0
 
 #dynamically update weighting
-P = np.array([[1, 0, 0], [0, 1, 0], [0, 0, 1]]) #how uncertain you currently are about each state, and how uncertainties are correlated
-Q = np.array([[0.01, 0, 0], [0, 0.01, 0], [0, 0, 0.01]]) #how much new uncertainty is added by the prediction step (how uncertain you are abt gyro)
-R = np.array([[0.1, 0, 0], [0, 0.1, 0], [0, 0, 0.1]]) #how much uncertainty is added by the measurement step (how uncertain you are abt accel/mag)
-K = np.zeros((3, 3)) #how much to trust the measurement vs the prediction, kalman gain
+P = np.eye(6) #how uncertain you currently are about each state, and how uncertainties are correlated
+Q = np.diag([0.01, 0.01, 0.01, 1e-6, 1e-6, 1e-6]) #how much new uncertainty is added by the prediction step (how uncertain you are abt gyro)
+R = np.diag([0.1, 0.1, 0.1, 0.1]) #how much uncertainty is added by the measurement step (how uncertain you are abt accel/mag)
+K = np.zeros((6, 4)) #how much to trust the measurement vs the prediction, kalman gain
 
-F = np.eye(3) #state transition matrix, how the state evolves from one step to the next without control input (identity for this case)
-H = np.eye(3) #measurement matrix, how the measurements relate to the state (identity for this case)
-I = np.eye(3) #identity matrix for updating the covariance
+F = np.eye(6) #state transition matrix, how the state evolves from one step to the next without control input (identity for this case)
+I = np.eye(6) #identity matrix for updating the covariance
+H = np.zeros((4, 6)) #measurement matrix, how the measurements relate to the state
 
 last_time = time.time()
 
@@ -72,7 +75,7 @@ def get_accel():
 def get_mag():
     return mag_x, mag_y, mag_z
 
-def update_F(pitch_dot, pitch, yaw_dot, dt, F):
+def update_F(pitch_dot, pitch, yaw_dot, dt, roll, F):
     #F is a matrix of partial derivatives - a Jacobian
     #jacobian needs to be recomputed live if function it's derived from is non-linear
     #since the process model has roll dot (with sin/cos), its now nonlinear
@@ -85,7 +88,23 @@ def update_F(pitch_dot, pitch, yaw_dot, dt, F):
     F[2][0] = dt * pitch_dot / np.cos(pitch)
     F[2][1] = dt * yaw_dot * np.tan(pitch)
     F[2][2] = 1
+    F[0][3] = -dt
+    F[0][4] = -dt * np.sin(roll) * np.tan(pitch)
+    F[0][5] = -dt * np.cos(roll) * np.tan(pitch)
+    F[1][3] = 0 
+    F[1][4] = -dt * np.cos(roll)
+    F[1][5] = dt * np.sin(roll)
+    F[2][3] = 0
+    F[2][4] = -dt * np.sin(roll) / np.cos(pitch)
+    F[2][5] = -dt * np.cos(roll) / np.cos(pitch)
     return F
+
+def update_H(roll, pitch):
+    H[0] = [0, -math.cos(pitch), 0, 0, 0, 0]
+    H[1] = [math.cos(roll)*math.cos(pitch), -math.sin(roll)*math.sin(pitch), 0, 0, 0, 0]
+    H[2] = [-np.sin(roll)*math.cos(pitch), -math.cos(roll)*math.sin(pitch), 0, 0, 0, 0]
+    H[3] = [0, 0, 1, 0, 0, 0]
+    return H
 
 #main loop
 while True:
@@ -97,6 +116,10 @@ while True:
 
     mag_x_compensated = mag_x * math.cos(pitch) + mag_y * math.sin(roll) * math.sin(pitch) + mag_z * math.cos(roll) * math.sin(pitch)
     mag_y_compensated = mag_y * math.cos(roll) - mag_z * math.sin(roll)
+
+    corrected_gyro_x = gyro_x - bias_x
+    corrected_gyro_y = gyro_y - bias_y  
+    corrected_gyro_z = gyro_z - bias_z
 
     #predict: integrate gyro into current angle estimation
     now = time.time()
@@ -113,12 +136,13 @@ while True:
     # this is because roll pitch and yaw are human bookkeeping. they are defined in the world, and once the drone isn't 
     #level, the axes no longer line up. the dot equations incprporate the fact that the body and world axes don't line up
     #old code assumed roll += gyro_x * dt which is only correct when body frame = world frame, when drone is level
-    roll_dot = gyro_x + gyro_y * math.sin(roll) * math.tan(pitch) + gyro_z * math.cos(roll) * math.tan(pitch)
-    pitch_dot = gyro_y * math.cos(roll) - gyro_z * math.sin(roll)
-    yaw_dot = (gyro_y * math.sin(roll) + gyro_z * math.cos(roll)) / math.cos(pitch)
+    roll_dot = corrected_gyro_x + corrected_gyro_y * math.sin(roll) * math.tan(pitch) + corrected_gyro_z * math.cos(roll) * math.tan(pitch)
+    pitch_dot = corrected_gyro_y * math.cos(roll) - corrected_gyro_z * math.sin(roll)
+    yaw_dot = (corrected_gyro_y * math.sin(roll) + corrected_gyro_z * math.cos(roll)) / math.cos(pitch)
 
     # Update the state transition matrix based on the current state and time step
-    F = update_F(pitch_dot, pitch, yaw_dot, dt, F)  
+    F = update_F(pitch_dot, pitch, yaw_dot, dt, roll, F)  
+    H = update_H(roll, pitch)
 
     roll += roll_dot * dt
     pitch += pitch_dot * dt
@@ -128,19 +152,21 @@ while True:
     accel_roll = math.atan2(accel_y, accel_z)
     accel_pitch = math.atan2(-accel_x, math.sqrt(accel_y**2 + accel_z**2))
     accel_yaw = math.atan2(mag_y_compensated, mag_x_compensated)
+    predicted_accel = np.array([-math.sin(pitch),math.sin(roll)*math.cos(pitch), math.cos(roll)*math.cos(pitch)])
 
     #update covariances
     P = F @ P @ F.T + Q
     K = P @ H.T @ np.linalg.inv(H @ P @ H.T + R)
     P = (I - K @ H) @ P
 
-    measurement_vector = np.array([accel_roll, accel_pitch, accel_yaw])
-    predicted_state = np.array([roll, pitch, yaw])
-    residual = measurement_vector - H @ predicted_state
+    measurement_vector = np.array([accel_x, accel_y, accel_z, accel_yaw])
+    predicted_state = np.array([roll, pitch, yaw, bias_x, bias_y, bias_z])
+    predicted_measurement = np.array([predicted_accel[0], predicted_accel[1], predicted_accel[2], yaw])
+    residual =  measurement_vector - predicted_measurement
 
     corrected_state = predicted_state + K @ residual
 
-    roll, pitch, yaw = corrected_state
+    roll, pitch, yaw, bias_x, bias_y, bias_z = corrected_state
     
     print("roll: ", math.degrees(roll), "pitch: ", math.degrees(pitch), "yaw: ", math.degrees(yaw))
 
