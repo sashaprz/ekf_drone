@@ -22,6 +22,8 @@ Sine-wave ground truth per axis, sensors synthesized from it each step (bias + n
 
 ## RMS comparison (`ekf_rms.py`)
 
+RMS (root-mean-square) error: square each iteration's error, average over the run, square-root back to degrees. One number per filter that summarizes accuracy over a whole run and penalizes big spikes more than a plain average would — the standard metric for comparing estimators.
+
 Both EKF designs run against identical trajectory + sensor stream, fixed `dt`, 20s.
 
 | Gyro bias | Filter | Roll RMS | Pitch RMS | Yaw RMS |
