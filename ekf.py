@@ -37,11 +37,6 @@ mag_x = 1.0
 mag_y = 0
 mag_z = 0
 
-#guessing variables
-accel_roll = 0
-accel_pitch = 0
-accel_yaw = 0
-
 #state variables
 roll = 0
 pitch = 0
@@ -53,12 +48,12 @@ bias_z = 0
 #dynamically update weighting
 P = np.eye(6) #how uncertain you currently are about each state, and how uncertainties are correlated
 Q = np.diag([0.01, 0.01, 0.01, 1e-6, 1e-6, 1e-6]) #how much new uncertainty is added by the prediction step (how uncertain you are abt gyro)
-R = np.diag([0.1, 0.1, 0.1, 0.1]) #how much uncertainty is added by the measurement step (how uncertain you are abt accel/mag)
-K = np.zeros((6, 4)) #how much to trust the measurement vs the prediction, kalman gain
+R = np.diag([0.1, 0.1, 0.1, 0.1, 0.1, 0.1]) #how much uncertainty is added by the measurement step (how uncertain you are abt accel/mag)
+K = np.zeros((6, 6)) #how much to trust the measurement vs the prediction, kalman gain
 
 F = np.eye(6) #state transition matrix, how the state evolves from one step to the next without control input (identity for this case)
 I = np.eye(6) #identity matrix for updating the covariance
-H = np.zeros((4, 6)) #measurement matrix, how the measurements relate to the state
+H = np.zeros((6, 6)) #measurement matrix, how the measurements relate to the state
 
 last_time = time.time()
 
@@ -99,11 +94,18 @@ def update_F(pitch_dot, pitch, yaw_dot, dt, roll, F):
     F[2][5] = -dt * np.cos(roll) / np.cos(pitch)
     return F
 
-def update_H(roll, pitch):
+def update_H(roll, pitch, yaw):
+    #accel rows: jacobian of predicted_accel wrt state
     H[0] = [0, -math.cos(pitch), 0, 0, 0, 0]
     H[1] = [math.cos(roll)*math.cos(pitch), -math.sin(roll)*math.sin(pitch), 0, 0, 0, 0]
-    H[2] = [-np.sin(roll)*math.cos(pitch), -math.cos(roll)*math.sin(pitch), 0, 0, 0, 0]
-    H[3] = [0, 0, 1, 0, 0, 0]
+    H[2] = [-math.sin(roll)*math.cos(pitch), -math.cos(roll)*math.sin(pitch), 0, 0, 0, 0]
+
+    #mag rows: jacobian of predicted_mag wrt state
+    my = math.sin(roll)*math.sin(pitch)*math.cos(yaw) - math.cos(roll)*math.sin(yaw)
+    mz = math.cos(roll)*math.sin(pitch)*math.cos(yaw) + math.sin(roll)*math.sin(yaw)
+    H[3] = [0, -math.sin(pitch)*math.cos(yaw), -math.cos(pitch)*math.sin(yaw), 0, 0, 0]
+    H[4] = [mz, math.sin(roll)*math.cos(pitch)*math.cos(yaw), -math.sin(roll)*math.sin(pitch)*math.sin(yaw) - math.cos(roll)*math.cos(yaw), 0, 0, 0]
+    H[5] = [-my, math.cos(roll)*math.cos(pitch)*math.cos(yaw), -math.cos(roll)*math.sin(pitch)*math.sin(yaw) + math.sin(roll)*math.cos(yaw), 0, 0, 0]
     return H
 
 #main loop
@@ -113,9 +115,6 @@ while True:
     gyro_x, gyro_y, gyro_z = get_gyro()
     mag_x, mag_y, mag_z = get_mag()
     accel_x, accel_y, accel_z = get_accel()
-
-    mag_x_compensated = mag_x * math.cos(pitch) + mag_y * math.sin(roll) * math.sin(pitch) + mag_z * math.cos(roll) * math.sin(pitch)
-    mag_y_compensated = mag_y * math.cos(roll) - mag_z * math.sin(roll)
 
     corrected_gyro_x = gyro_x - bias_x
     corrected_gyro_y = gyro_y - bias_y  
@@ -141,30 +140,29 @@ while True:
     yaw_dot = (corrected_gyro_y * math.sin(roll) + corrected_gyro_z * math.cos(roll)) / math.cos(pitch)
 
     # Update the state transition matrix based on the current state and time step
-    F = update_F(pitch_dot, pitch, yaw_dot, dt, roll, F)  
-    H = update_H(roll, pitch)
+    F = update_F(pitch_dot, pitch, yaw_dot, dt, roll, F)
+    H = update_H(roll, pitch, yaw)
 
     roll += roll_dot * dt
     pitch += pitch_dot * dt
     yaw += yaw_dot * dt
 
-    #compute accel based roll/pitch and mag based yaw independently
-    accel_roll = math.atan2(accel_y, accel_z)
-    accel_pitch = math.atan2(-accel_x, math.sqrt(accel_y**2 + accel_z**2))
-    accel_yaw = math.atan2(mag_y_compensated, mag_x_compensated)
-    predicted_accel = np.array([-math.sin(pitch),math.sin(roll)*math.cos(pitch), math.cos(roll)*math.cos(pitch)])
+    predicted_accel = np.array([-math.sin(pitch), math.sin(roll)*math.cos(pitch), math.cos(roll)*math.cos(pitch)])
+    predicted_mag = np.array([math.cos(pitch)*math.cos(yaw),
+                               math.sin(roll)*math.sin(pitch)*math.cos(yaw) - math.cos(roll)*math.sin(yaw),
+                               math.cos(roll)*math.sin(pitch)*math.cos(yaw) + math.sin(roll)*math.sin(yaw)])
 
-    #update covariances
+    #predict covariance, then compute gain (canonical order: predict state/cov -> gain -> correct state -> correct cov)
     P = F @ P @ F.T + Q
     K = P @ H.T @ np.linalg.inv(H @ P @ H.T + R)
-    P = (I - K @ H) @ P
 
-    measurement_vector = np.array([accel_x, accel_y, accel_z, accel_yaw])
+    measurement_vector = np.array([accel_x, accel_y, accel_z, mag_x, mag_y, mag_z])
     predicted_state = np.array([roll, pitch, yaw, bias_x, bias_y, bias_z])
-    predicted_measurement = np.array([predicted_accel[0], predicted_accel[1], predicted_accel[2], yaw])
+    predicted_measurement = np.concatenate([predicted_accel, predicted_mag])
     residual =  measurement_vector - predicted_measurement
 
     corrected_state = predicted_state + K @ residual
+    P = (I - K @ H) @ P
 
     roll, pitch, yaw, bias_x, bias_y, bias_z = corrected_state
     

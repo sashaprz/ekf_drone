@@ -20,7 +20,6 @@ measrement model: accel and mag. they give an absolute reference to correct drif
 the hypothesized orietnation you're comparing accel/mag against is the gyro's measurement
   """
 
-import time
 import math
 import numpy as np
 
@@ -36,11 +35,6 @@ accel_z = math.cos(math.radians(10)) #simulate 10 deg roll
 mag_x = 1.0
 mag_y = 0
 mag_z = 0
-
-#guessing variables
-accel_roll = 0
-accel_pitch = 0
-accel_yaw = 0
 
 #state variables
 roll = 0
@@ -74,15 +68,15 @@ mag_noise_std = 0.01
 #dynamically update weighting
 P = np.eye(6) #how uncertain you currently are about each state, and how uncertainties are correlated
 Q = np.diag([0.01, 0.01, 0.01, 1e-6, 1e-6, 1e-6]) #how much new uncertainty is added by the prediction step (how uncertain you are abt gyro)
-R = np.diag([0.1, 0.1, 0.1, 0.1]) #how much uncertainty is added by the measurement step (how uncertain you are abt accel/mag)
-K = np.zeros((6, 4)) #how much to trust the measurement vs the prediction, kalman gain
+R = np.diag([0.1, 0.1, 0.1, 0.1, 0.1, 0.1]) #how much uncertainty is added by the measurement step (how uncertain you are abt accel/mag)
+K = np.zeros((6, 6)) #how much to trust the measurement vs the prediction, kalman gain
 
 F = np.eye(6) #state transition matrix, how the state evolves from one step to the next without control input (identity for this case)
 I = np.eye(6) #identity matrix for updating the covariance
-H = np.zeros((4, 6)) #measurement matrix, how the measurements relate to the state
+H = np.zeros((6, 6)) #measurement matrix, how the measurements relate to the state
 
-last_time = time.time()
-start_time = time.time()
+dt = 0.01 #fixed simulated timestep - deterministic, not wall-clock, so truth and filter can't desync
+t = 0.0   #simulated elapsed time, advanced by exactly dt each iteration
 
 #sub functions to find variables for loop
 def get_gyro(t):
@@ -102,9 +96,11 @@ def get_accel(t):
               true_az + np.random.normal(0, accel_noise_std))
 
 def get_mag(t):
-    true_mx = math.cos(true_yaw(t)) * math.cos(true_pitch(t))
-    true_my = math.sin(true_roll(t)) * math.sin(true_pitch(t)) * math.cos(-true_yaw(t)) - math.cos(true_roll(t)) * math.sin(-true_yaw(t))
-    true_mz = math.sin(-true_yaw(t)) * math.sin(true_roll(t)) + math.cos(-true_yaw(t)) * math.cos(true_roll(t)) * math.sin(true_pitch(t))
+    #matches the filter's own predicted_mag convention directly now that the
+    #atan2/compensation path is gone - no sign flip needed (see chat for why)
+    true_mx = math.cos(true_pitch(t)) * math.cos(true_yaw(t))
+    true_my = math.sin(true_roll(t)) * math.sin(true_pitch(t)) * math.cos(true_yaw(t)) - math.cos(true_roll(t)) * math.sin(true_yaw(t))
+    true_mz = math.cos(true_roll(t)) * math.sin(true_pitch(t)) * math.cos(true_yaw(t)) + math.sin(true_roll(t)) * math.sin(true_yaw(t))
     return (true_mx + np.random.normal(0, mag_noise_std),
             true_my + np.random.normal(0, mag_noise_std),
             true_mz + np.random.normal(0, mag_noise_std))
@@ -133,11 +129,18 @@ def update_F(pitch_dot, pitch, yaw_dot, dt, roll, F):
     F[2][5] = -dt * np.cos(roll) / np.cos(pitch)
     return F
 
-def update_H(roll, pitch):
+def update_H(roll, pitch, yaw):
+    #accel rows: jacobian of predicted_accel wrt state
     H[0] = [0, -math.cos(pitch), 0, 0, 0, 0]
     H[1] = [math.cos(roll)*math.cos(pitch), -math.sin(roll)*math.sin(pitch), 0, 0, 0, 0]
-    H[2] = [-np.sin(roll)*math.cos(pitch), -math.cos(roll)*math.sin(pitch), 0, 0, 0, 0]
-    H[3] = [0, 0, 1, 0, 0, 0]
+    H[2] = [-math.sin(roll)*math.cos(pitch), -math.cos(roll)*math.sin(pitch), 0, 0, 0, 0]
+
+    #mag rows: jacobian of predicted_mag wrt state
+    my = math.sin(roll)*math.sin(pitch)*math.cos(yaw) - math.cos(roll)*math.sin(yaw)
+    mz = math.cos(roll)*math.sin(pitch)*math.cos(yaw) + math.sin(roll)*math.sin(yaw)
+    H[3] = [0, -math.sin(pitch)*math.cos(yaw), -math.cos(pitch)*math.sin(yaw), 0, 0, 0]
+    H[4] = [mz, math.sin(roll)*math.cos(pitch)*math.cos(yaw), -math.sin(roll)*math.sin(pitch)*math.sin(yaw) - math.cos(roll)*math.cos(yaw), 0, 0, 0]
+    H[5] = [-my, math.cos(roll)*math.cos(pitch)*math.cos(yaw), -math.cos(roll)*math.sin(pitch)*math.sin(yaw) + math.sin(roll)*math.cos(yaw), 0, 0, 0]
     return H
 
 def true_roll(t):
@@ -161,23 +164,17 @@ def true_yaw_dot(t):
 #main loop
 while True:
 
-    now = time.time()
-    t = now - start_time
-
     #read gyro, mag, accel
     gyro_x, gyro_y, gyro_z = get_gyro(t)
     mag_x, mag_y, mag_z = get_mag(t)
     accel_x, accel_y, accel_z = get_accel(t)
 
-    mag_x_compensated = mag_x * math.cos(pitch) + mag_y * math.sin(roll) * math.sin(pitch) + mag_z * math.cos(roll) * math.sin(pitch)
-    mag_y_compensated = mag_y * math.cos(roll) - mag_z * math.sin(roll)
-
     corrected_gyro_x = gyro_x - bias_x
-    corrected_gyro_y = gyro_y - bias_y  
+    corrected_gyro_y = gyro_y - bias_y
     corrected_gyro_z = gyro_z - bias_z
 
     #predict: integrate gyro into current angle estimation
-    dt = now - last_time #sampling as fast as the hardware can handle
+    #dt is fixed (set above) - no wall-clock read here anymore
 
     #youre just adding how fastyou've moved multiplied by how long you moved it
     # so if you went 3 deg/s clockwise for 1 sec then youre adding 3 degrees to current angle 
@@ -195,30 +192,29 @@ while True:
     yaw_dot = (corrected_gyro_y * math.sin(roll) + corrected_gyro_z * math.cos(roll)) / math.cos(pitch)
 
     # Update the state transition matrix based on the current state and time step
-    F = update_F(pitch_dot, pitch, yaw_dot, dt, roll, F)  
-    H = update_H(roll, pitch)
+    F = update_F(pitch_dot, pitch, yaw_dot, dt, roll, F)
+    H = update_H(roll, pitch, yaw)
 
     roll += roll_dot * dt
     pitch += pitch_dot * dt
     yaw += yaw_dot * dt
 
-    #compute accel based roll/pitch and mag based yaw independently
-    accel_roll = math.atan2(accel_y, accel_z)
-    accel_pitch = math.atan2(-accel_x, math.sqrt(accel_y**2 + accel_z**2))
-    accel_yaw = math.atan2(mag_y_compensated, mag_x_compensated)
-    predicted_accel = np.array([-math.sin(pitch),math.sin(roll)*math.cos(pitch), math.cos(roll)*math.cos(pitch)])
+    predicted_accel = np.array([-math.sin(pitch), math.sin(roll)*math.cos(pitch), math.cos(roll)*math.cos(pitch)])
+    predicted_mag = np.array([math.cos(pitch)*math.cos(yaw),
+                               math.sin(roll)*math.sin(pitch)*math.cos(yaw) - math.cos(roll)*math.sin(yaw),
+                               math.cos(roll)*math.sin(pitch)*math.cos(yaw) + math.sin(roll)*math.sin(yaw)])
 
-    #update covariances
+    #predict covariance, then compute gain (canonical order: predict state/cov -> gain -> correct state -> correct cov)
     P = F @ P @ F.T + Q
     K = P @ H.T @ np.linalg.inv(H @ P @ H.T + R)
-    P = (I - K @ H) @ P
 
-    measurement_vector = np.array([accel_x, accel_y, accel_z, accel_yaw])
+    measurement_vector = np.array([accel_x, accel_y, accel_z, mag_x, mag_y, mag_z])
     predicted_state = np.array([roll, pitch, yaw, bias_x, bias_y, bias_z])
-    predicted_measurement = np.array([predicted_accel[0], predicted_accel[1], predicted_accel[2], yaw])
+    predicted_measurement = np.concatenate([predicted_accel, predicted_mag])
     residual =  measurement_vector - predicted_measurement
 
     corrected_state = predicted_state + K @ residual
+    P = (I - K @ H) @ P
 
     roll, pitch, yaw, bias_x, bias_y, bias_z = corrected_state
     
@@ -230,5 +226,4 @@ while True:
           "pitch: ", math.degrees(pitch), "(true: ", math.degrees(true_pitch(t)), " err: ", pitch_error, ")",
           "yaw: ", math.degrees(yaw), "(true: ", math.degrees(true_yaw(t)), " err: ", yaw_error, ")")
 
-    last_time = now
-    time.sleep(0.01) #sleep for 10ms to simulate sensor reading rate
+    t += dt #advance simulated time by exactly one fixed step
