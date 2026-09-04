@@ -1,14 +1,14 @@
 # python_drone
 
-Attitude estimation for a drone from gyro + accelerometer + magnetometer — a complementary filter (`complementary.py`) vs. an EKF (`ekf.py`), tested with a simulated 10° roll tilt and a constant 5°/s gyro bias.
+Attitude estimation for a drone from gyro + accelerometer + magnetometer — three filters (`complementary.py`, `ekf.py`), tested with a simulated 10° roll tilt and a constant 5°/s gyro bias.
 
 ## Results
 
-| | Complementary filter | EKF |
-|---|---|---|
-| True roll | 10° | 10° |
-| Converged roll | ~12.6–12.7° | ~10.14° |
-| Why | Fixed blend weight (0.98) can't fully reject a sustained gyro bias — settles at an offset instead of the true value | Kalman gain computed from `Q`/`R` (~0.27 trust in the measurement, vs. the complementary filter's fixed 2%) tracks the true value much more closely |
-| Coupled pitch/yaw (gyro_y ≠ 0) | Not supported (decoupled per-axis integration) | pitch/yaw pick up realistic nonzero values, since the process-model Jacobian correctly couples gyro_y into both |
+| | Complementary filter | EKF (angle-based) | EKF (raw-vector + bias) |
+|---|---|---|---|
+| True roll | 10° | 10° | 10° |
+| Converged roll | ~12.6–12.7° | ~10.14° | ~10.03° |
+| Converged pitch | n/a (0°, no coupling) | ~4.8° | ~0.017° |
+| Converged yaw | n/a (0°, no coupling) | ~0.86° | ~0.003° |
 
-Neither filter converges to *exactly* 10° — that residual is a genuinely constant gyro bias, which would need a bias state in the filter to fully cancel (not yet implemented).
+Each upgrade closes a different gap: the fixed-weight complementary filter can't reject a sustained gyro bias, the angle-based EKF fixes that via a computed gain but still leaves a coupling-driven offset in pitch/yaw, and adding raw-vector measurements plus a gyro-bias state pulls all three angles close to their true values.
