@@ -26,6 +26,8 @@ RMS (root-mean-square) error: square each iteration's error, average over the ru
 
 Both EKF designs run against identical trajectory + sensor stream, fixed `dt`, 20s.
 
+![RMS error comparison](rms_comparison.png)
+
 | Gyro bias | Filter | Roll RMS | Pitch RMS | Yaw RMS |
 |---|---|---|---|---|
 | Original (2, -1, 0.5°/s) | Angle-based | 0.474° | 0.427° | 0.238° |
