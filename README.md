@@ -11,8 +11,10 @@ Attitude estimation for a drone from gyro + accelerometer + magnetometer — com
 | | Complementary filter | EKF (angle-based) | EKF (raw-vector + bias) |
 |---|---|---|---|
 | Converged roll (true: 10°) | ~12.6–12.7° | ~10.14° | ~10.03° |
-| Converged pitch (true: 0°) | n/a (no coupling) | ~4.8° | ~0.017° |
-| Converged yaw (true: 0°) | n/a (no coupling) | ~0.86° | ~0.003° |
+| Converged pitch (true: 0°, isolated single-axis test) | ~12.55° | ~4.8° | ~0.017° |
+| Converged yaw (true: 0°, isolated single-axis test) | ~12.54° | ~0.86° | ~0.003° |
+
+(Complementary filter has no cross-axis coupling, so pitch/yaw are tested with their own isolated 5°/s bias, not the same combined run as the EKFs.)
 
 ## Dynamic trajectory test (`ekf_gyro_bias.py`)
 
@@ -28,15 +30,17 @@ Sine-wave ground truth per axis, sensors synthesized from it each step (bias + n
 
 RMS (root-mean-square) error: square each iteration's error, average over the run, square-root back to degrees. One number per filter that summarizes accuracy over a whole run and penalizes big spikes more than a plain average would — the standard metric for comparing estimators.
 
-Both EKF designs run against identical trajectory + sensor stream, fixed `dt`, 20s.
+All three filters run against identical trajectory + sensor stream (same RNG seed), fixed `dt`, 20s.
 
 ![RMS error comparison](rms_comparison.png)
 
 | Gyro bias | Filter | Roll RMS | Pitch RMS | Yaw RMS |
 |---|---|---|---|---|
-| Original (2, -1, 0.5°/s) | Angle-based | 0.474° | 0.427° | 0.238° |
-| Original | Raw-vector + bias | 0.469° | 0.296° | 0.240° |
-| 10x larger | Angle-based | 0.723° | 0.510° | 0.268° |
-| 10x larger | Raw-vector + bias | 0.483° | 0.299° | 0.246° |
+| Original (2, -1, 0.5°/s) | Complementary | 0.954° | 1.249° | 0.327° |
+| Original | Angle-based | 0.445° | 0.460° | 0.230° |
+| Original | Raw-vector + bias | 0.443° | 0.305° | 0.229° |
+| 10x larger | Complementary | 9.603° | 5.029° | 2.534° |
+| 10x larger | Angle-based | 0.681° | 0.521° | 0.268° |
+| 10x larger | Raw-vector + bias | 0.449° | 0.308° | 0.229° |
 
-At 10x bias the angle-based EKF degrades on every axis while raw-vector+bias barely moves — the bias state is actively canceling the bias, not just tolerating it.
+Complementary is already visibly worse at original bias (fixed weight, no computed gain), and falls apart at 10x bias (roll RMS 9.6°) while both EKFs stay well-behaved — raw-vector+bias barely moves at all, since it's actively canceling the bias rather than just tolerating it.
