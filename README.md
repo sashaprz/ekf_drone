@@ -2,7 +2,11 @@
 
 Attitude estimation for a drone from gyro + accelerometer + magnetometer — complementary filter vs. two EKF designs.
 
+**Gyro bias**: a real gyro doesn't read exactly zero at rest — manufacturing imperfections, temperature drift, and vibration give it a small persistent offset that isn't true rotation. Left uncorrected it integrates into steadily growing angle error, which is why the better filters below estimate and subtract it.
+
 ## Static test (fixed 10° tilt, constant 5°/s gyro bias)
+
+![Static test comparison](static_comparison.png)
 
 | | Complementary filter | EKF (angle-based) | EKF (raw-vector + bias) |
 |---|---|---|---|
