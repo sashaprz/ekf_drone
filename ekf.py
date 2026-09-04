@@ -22,12 +22,13 @@ the hypothesized orietnation you're comparing accel/mag against is the gyro's me
 
 import time
 import math
+import numpy as np
 
 #variable definition
 weight = 0.98 #weight for complementary filter, how much to trust gyro vs accel/mag
 
 #measurement variables
-gyro_x_dps = 0 #raw gyro constants, in deg/s - never overwritten by the loop
+gyro_x_dps = 5 #raw gyro constants, in deg/s - never overwritten by the loop
 gyro_y_dps = 0
 gyro_z_dps = 0
 accel_x = 0
@@ -46,6 +47,12 @@ accel_yaw = 0
 roll = 0
 pitch = 0
 yaw = 0
+
+#dynamically update weighting
+state_covariance = np.array([[1, 0, 0], [0, 1, 0], [0, 0, 1]]) #how uncertain you currently are about each state, and how uncertainties are correlated
+process_noise = np.array([[0.01, 0, 0], [0, 0.01, 0], [0, 0, 0.01]]) #how much new uncertainty is added by the prediction step (how uncertain you are abt gyro)
+measurement_noise = np.array([[0.1, 0, 0], [0, 0.1, 0], [0, 0, 0.1]]) #how much uncertainty is added by the measurement step (how uncertain you are abt accel/mag)
+kalman_gain = np.zeros((3, 3)) #how much to trust the measurement vs the prediction
 
 last_time = time.time()
 
@@ -102,4 +109,4 @@ while True:
     #store result as new "current angle estimate" for next loop
 
     last_time = now
-    time.sleep(0.5) #sleep for 500ms to simulate sensor reading rate
+    time.sleep(0.01) #sleep for 10ms to simulate sensor reading rate
