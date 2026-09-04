@@ -28,7 +28,7 @@ import numpy as np
 
 #measurement variables
 gyro_x_dps = 5 #raw gyro constants, in deg/s - never overwritten by the loop
-gyro_y_dps = 0
+gyro_y_dps = 3 #nonzero, to exercise coupling into pitch_dot and (via roll) into yaw_dot
 gyro_z_dps = 0
 accel_x = 0
 accel_y = math.sin(math.radians(10)) #simulate 10 deg roll
@@ -74,6 +74,8 @@ def get_mag():
 
 def update_F(pitch_dot, pitch, yaw_dot, dt, F):
     #F is a matrix of partial derivatives - a Jacobian
+    #jacobian needs to be recomputed live if function it's derived from is non-linear
+    #since the process model has roll dot (with sin/cos), its now nonlinear
     F[0][0] = 1 + dt * np.tan(pitch) * pitch_dot
     F[0][1] = dt * yaw_dot / np.cos(pitch)
     F[0][2] = 0
@@ -105,15 +107,18 @@ while True:
     # since you do this many many times for a tiny timestep, that is technically integration 
     #it needs to many tiny timesteps bc the drone changes speed many times so each tiny step is
     #roughly accurate only bc the rate is constant in that tiny of a window. 
+    #need roll dot because roll is not just gyro_x, it is also affected by gyro_y and gyro_z when pitch is not zero. 
+    # the gyrp readings are measured around the dron's body axes. pitch and yaw though, are defined relative to the ground. 
+    # a rotation rate the gyro reports around its own axes dont match how fast pitch/yaw is changing in the real world. 
+    # this is because roll pitch and yaw are human bookkeeping. they are defined in the world, and once the drone isn't 
+    #level, the axes no longer line up. the dot equations incprporate the fact that the body and world axes don't line up
+    #old code assumed roll += gyro_x * dt which is only correct when body frame = world frame, when drone is level
     roll_dot = gyro_x + gyro_y * math.sin(roll) * math.tan(pitch) + gyro_z * math.cos(roll) * math.tan(pitch)
     pitch_dot = gyro_y * math.cos(roll) - gyro_z * math.sin(roll)
     yaw_dot = (gyro_y * math.sin(roll) + gyro_z * math.cos(roll)) / math.cos(pitch)
 
     # Update the state transition matrix based on the current state and time step
     F = update_F(pitch_dot, pitch, yaw_dot, dt, F)  
-
-    #need roll dot because roll is not just gyro_x, it is also affected by gyro_y and gyro_z when pitch is not zero. same for pitch and yaw.
-    #old code addumed roll += gyro_x * dt which is only correct when body frame = world frame, when drone is level
 
     roll += roll_dot * dt
     pitch += pitch_dot * dt
