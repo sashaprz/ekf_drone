@@ -103,6 +103,38 @@ def update_F_raw(pitch_dot, pitch, yaw_dot, dt, roll, F):
     F[2][5] = -dt * math.cos(roll) / math.cos(pitch)
     return F
 
+def quat_mult(q1, q2):
+    w = q1[0]*q2[0] - q1[1]*q2[1] - q1[2]*q2[2] - q1[3]*q2[3]
+    x = q1[0]*q2[1] + q1[1]*q2[0] + q1[2]*q2[3] - q1[3]*q2[2]
+    y = q1[0]*q2[2] - q1[1]*q2[3] + q1[2]*q2[0] + q1[3]*q2[1]
+    z = q1[0]*q2[3] + q1[1]*q2[2] - q1[2]*q2[1] + q1[3]*q2[0]
+    return np.array([w, x, y, z])
+
+def quat_conjugate(q):
+    return np.array([q[0], -q[1], -q[2], -q[3]])
+
+def rotate_by_quat(q, v):
+    v_quat = np.array([0.0, v[0], v[1], v[2]])
+    rotated = quat_mult(quat_mult(q, v_quat), quat_conjugate(q))
+    return rotated[1:4]
+
+def skew(v):
+    return np.array([[0,-v[2],v[1]], [v[2],0,-v[0]], [-v[1],v[0],0]])
+
+def update_F_quat(w, dt, F):
+    F[0:3, 0:3] = np.eye(3) - dt * skew(w)
+    F[0:3, 3:6] = -dt * np.eye(3)
+    F[3:6, 0:3] = 0
+    F[3:6, 3:6] = np.eye(3)
+    return F
+
+def quat_to_euler(q):
+    w, x, y, z = q
+    roll = math.atan2(2*(w*x + y*z), 1 - 2*(x*x + y*y))
+    pitch = math.asin(max(-1.0, min(1.0, 2*(w*y - z*x))))
+    yaw = math.atan2(2*(w*z + x*y), 1 - 2*(y*y + z*z))
+    return roll, pitch, yaw
+
 def update_H_raw(roll, pitch, yaw, H_raw):
     H_raw[0] = [0, -math.cos(pitch), 0, 0, 0, 0]
     H_raw[1] = [math.cos(roll)*math.cos(pitch), -math.sin(roll)*math.sin(pitch), 0, 0, 0, 0]
@@ -140,10 +172,23 @@ def run_trial(bias_x, bias_y, bias_z, num_steps=2000, dt=0.01, seed=0):
     H_raw = np.zeros((6, 6))
     I_raw = np.eye(6)
 
+    #--- Filter D: quaternion MEKF (quaternarions.py's design - quaternion attitude,
+    #    raw accel/mag vectors, gyro-bias state, multiplicative error-state correction).
+    #    Same Q/R as Filter B so the comparison isolates attitude parameterization
+    #    (quaternion vs. Euler), not a difference in tuning.
+    q_quat = np.array([1.0, 0.0, 0.0, 0.0])
+    bias_x_quat, bias_y_quat, bias_z_quat = 0.0, 0.0, 0.0
+    P_quat = np.eye(6)
+    Q_quat = np.diag([0.01, 0.01, 0.01, 1e-6, 1e-6, 1e-6])
+    R_quat = np.diag([0.1, 0.1, 0.1, 0.1, 0.1, 0.1])
+    F_quat = np.eye(6)
+    I_quat = np.eye(6)
+
     t = 0.0
     sse_comp = np.zeros(3)
     sse_angle = np.zeros(3)
     sse_raw = np.zeros(3)
+    sse_quat = np.zeros(3)
 
     for _ in range(num_steps):
 
@@ -229,6 +274,49 @@ def run_trial(bias_x, bias_y, bias_z, num_steps=2000, dt=0.01, seed=0):
 
         roll_raw, pitch_raw, yaw_raw, bias_x_raw, bias_y_raw, bias_z_raw = corrected_raw
 
+        #--- Filter D step (quaternion MEKF) ---
+        corrected_gyro_x_q = gyro_x - bias_x_quat
+        corrected_gyro_y_q = gyro_y - bias_y_quat
+        corrected_gyro_z_q = gyro_z - bias_z_quat
+
+        w_quat_rate = np.array([0.0, corrected_gyro_x_q, corrected_gyro_y_q, corrected_gyro_z_q])
+        q_dot = 0.5 * quat_mult(q_quat, w_quat_rate)
+        q_quat = q_quat + q_dot * dt
+        q_quat = q_quat / np.linalg.norm(q_quat)
+
+        w_quat_vec = np.array([corrected_gyro_x_q, corrected_gyro_y_q, corrected_gyro_z_q])
+        F_quat = update_F_quat(w_quat_vec, dt, F_quat)
+        P_quat = F_quat @ P_quat @ F_quat.T + Q_quat
+
+        predicted_accel_quat = rotate_by_quat(quat_conjugate(q_quat), np.array([0.0, 0.0, 1.0]))
+        predicted_mag_quat = rotate_by_quat(quat_conjugate(q_quat), np.array([1.0, 0.0, 0.0]))
+
+        H_quat = np.zeros((6, 6))
+        H_quat[0:3, 0:3] = skew(predicted_accel_quat)
+        H_quat[3:6, 0:3] = skew(predicted_mag_quat)
+
+        K_quat = P_quat @ H_quat.T @ np.linalg.inv(H_quat @ P_quat @ H_quat.T + R_quat)
+
+        measurement_quat = np.array([accel_x, accel_y, accel_z, mag_x, mag_y, mag_z])
+        predicted_measurement_quat = np.concatenate([predicted_accel_quat, predicted_mag_quat])
+        residual_quat = measurement_quat - predicted_measurement_quat
+
+        error_state_quat = K_quat @ residual_quat
+        P_quat = (I_quat - K_quat @ H_quat) @ P_quat
+
+        d_theta_quat = error_state_quat[0:3]
+        d_bias_quat = error_state_quat[3:6]
+
+        bias_x_quat += d_bias_quat[0]
+        bias_y_quat += d_bias_quat[1]
+        bias_z_quat += d_bias_quat[2]
+
+        dq = np.array([1.0, d_theta_quat[0]/2, d_theta_quat[1]/2, d_theta_quat[2]/2])
+        q_quat = quat_mult(q_quat, dq)
+        q_quat = q_quat / np.linalg.norm(q_quat)
+
+        roll_quat, pitch_quat, yaw_quat = quat_to_euler(q_quat)
+
         #--- accumulate squared error against ground truth, in degrees ---
         true_r, true_p, true_y = math.degrees(true_roll(t)), math.degrees(true_pitch(t)), math.degrees(true_yaw(t))
 
@@ -241,18 +329,23 @@ def run_trial(bias_x, bias_y, bias_z, num_steps=2000, dt=0.01, seed=0):
         sse_raw += np.array([math.degrees(roll_raw) - true_r,
                               math.degrees(pitch_raw) - true_p,
                               math.degrees(yaw_raw) - true_y]) ** 2
+        sse_quat += np.array([math.degrees(roll_quat) - true_r,
+                               math.degrees(pitch_quat) - true_p,
+                               math.degrees(yaw_quat) - true_y]) ** 2
 
         t += dt
 
-    return np.sqrt(sse_comp / num_steps), np.sqrt(sse_angle / num_steps), np.sqrt(sse_raw / num_steps)
+    return (np.sqrt(sse_comp / num_steps), np.sqrt(sse_angle / num_steps),
+            np.sqrt(sse_raw / num_steps), np.sqrt(sse_quat / num_steps))
 
 if __name__ == "__main__":
     for label, (bx, by, bz) in [
         ("Original bias", (math.radians(2), math.radians(-1), math.radians(0.5))),
         ("10x larger bias", (math.radians(20), math.radians(-10), math.radians(5))),
     ]:
-        rms_comp, rms_angle, rms_raw = run_trial(bx, by, bz)
+        rms_comp, rms_angle, rms_raw, rms_quat = run_trial(bx, by, bz)
         print(f"\n{label}:")
         print(f"  Complementary     RMS error (deg): roll={rms_comp[0]:.3f}  pitch={rms_comp[1]:.3f}  yaw={rms_comp[2]:.3f}")
         print(f"  Angle-based EKF   RMS error (deg): roll={rms_angle[0]:.3f}  pitch={rms_angle[1]:.3f}  yaw={rms_angle[2]:.3f}")
         print(f"  Raw-vector+bias   RMS error (deg): roll={rms_raw[0]:.3f}  pitch={rms_raw[1]:.3f}  yaw={rms_raw[2]:.3f}")
+        print(f"  Quaternion MEKF   RMS error (deg): roll={rms_quat[0]:.3f}  pitch={rms_quat[1]:.3f}  yaw={rms_quat[2]:.3f}")

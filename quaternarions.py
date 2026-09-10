@@ -1,0 +1,182 @@
+"""
+  SoC EKF, generalized:
+  - State: SoC
+  - Input (drives prediction): current, via Coulomb counting — SoC_k+1 =
+    SoC_k + (I/Q)*dt
+  - Measurement model (nonlinear, maps state → expected sensor reading):
+    OCV(SoC) curve, compared against measured terminal voltage
+  - Jacobians of both, for covariance propagation
+
+  input: gyrp. how fast orientation is changing. take curent orientation estimate, integrate gyro
+    rate over dt, get new orientation. same as coulomb counting. drift accumulates, just like it does for
+    coulomb counting.
+measrement model: accel and mag. they give an absolute reference to correct drift. accelerometer measures specific force.
+    when drone isn't accelerating that's just gravity, and gravity is "down." so given a hypothesized orientation you can predict
+    where gravity SHOULD point, and compare that to measured accel value. mismatch tells you roll/pitch error.
+    magnometer does same for yaw. given a hypothesized orientation, predict what direction earth's magnetic
+    field SHOULD be pointing, compare to actual reading.
+    accelerometer doesn't work when drone accelerating hard (bc then the gravity down assumption isn't valid) and megnometer is sensitive to
+    magnetic interference.
+the hypothesized orietnation you're comparing accel/mag against is the gyro's measurement
+  """
+
+import time
+import math
+import numpy as np
+
+#variable definition
+k = 1 #how agressively to increase accel measurement noise when drone is accelerating.
+chi2_threshold = 11.34 #chi2 threshold for 3 DOF, 99% confidence interval
+
+#measurement variables
+gyro_x_dps = 5 #raw gyro constants, in deg/s - never overwritten by the loop
+gyro_y_dps = 3 #nonzero, to exercise coupling into pitch_dot and (via roll) into yaw_dot
+gyro_z_dps = 0
+accel_x = 0
+accel_y = math.sin(math.radians(10)) #simulate 10 deg roll
+accel_z = math.cos(math.radians(10)) #simulate 10 deg roll
+mag_x = 1.0
+mag_y = 0
+mag_z = 0
+
+#state variables
+q = np.array([1.0, 0.0, 0.0, 0.0]) #identity quaternion, [w, x, y, z]
+bias_x = 0
+bias_y = 0
+bias_z = 0
+
+
+#dynamically update weighting
+P = np.eye(6) #how uncertain you currently are about each state, and how uncertainties are correlated
+Q = np.diag([0.01, 0.01, 0.01, 1e-6, 1e-6, 1e-6]) #how much new uncertainty is added by the prediction step (how uncertain you are abt gyro)
+R_accel_base = np.diag([0.1, 0.1, 0.1]) #how much uncertainty is added by the measurement step (how uncertain you are abt accel/mag)
+R_mag = np.diag([0.1, 0.1, 0.1]) #how much uncertainty is added by the measurement step (how uncertain you are abt accel/mag)
+
+F = np.eye(6) #state transition matrix, how the state evolves from one step to the next without control input (identity for this case)
+I = np.eye(6) #identity matrix for updating the covariance
+H = np.zeros((6, 6)) #measurement matrix, how the measurements relate to the state
+
+last_time = time.time()
+
+def rotate_by_quat(q, v):
+    # Rotate vector v by quaternion q
+    q_conj = np.array([q[0], -q[1], -q[2], -q[3]])
+    v_quat = np.array([0, v[0], v[1], v[2]])
+    rotated_v_quat = quat_mult(quat_mult(q, v_quat), q_conj)
+    return rotated_v_quat[1:]
+
+def quat_conjugate(q):
+    return np.array([q[0], -q[1], -q[2], -q[3]])
+
+def quat_mult(q1, q2):
+    w = q1[0]*q2[0] - q1[1]*q2[1] - q1[2]*q2[2] - q1[3]*q2[3]
+    x = q1[0]*q2[1] + q1[1]*q2[0] + q1[2]*q2[3] - q1[3]*q2[2]
+    y = q1[0]*q2[2] - q1[1]*q2[3] + q1[2]*q2[0] + q1[3]*q2[1]
+    z = q1[0]*q2[3] + q1[1]*q2[2] - q1[2]*q2[1] + q1[3]*q2[0]
+    return np.array([w, x, y, z])
+
+def skew(v):
+    return np.array([[0,-v[2],v[1]], [v[2],0,-v[0]], [-v[1],v[0],0]])
+
+#sub functions to find variables for loop
+def get_gyro():
+    #raw values are in deg/s, convert to rad/s before returning
+
+    return math.radians(gyro_x_dps), math.radians(gyro_y_dps), math.radians(gyro_z_dps)
+
+def get_accel():
+
+    return accel_x, accel_y, accel_z
+
+def get_mag():
+    return mag_x, mag_y, mag_z
+
+def update_F(w, dt, F):
+    #F is a matrix of partial derivatives - a Jacobian
+    # w = [wx, wy, wz] # corrected gyro vector
+    F[0:3, 0:3] = np.eye(3) - dt * skew(w)
+    F[0:3, 3:6] = -dt * np.eye(3)
+    F[3:6, 0:3] = 0
+    F[3:6, 3:6] = np.eye(3)
+    return F
+
+def update_H(predicted_accel, predicted_mag, H):
+    #accel rows: jacobian of predicted_accel wrt state
+    H[0:3, 0:3] = skew(predicted_accel)
+    H[0:3, 3:6] = 0
+    H[3:6, 0:3] = skew(predicted_mag)
+    H[3:6, 3:6] = 0
+    return H
+
+#main loop
+while True:
+
+    #read gyro, mag, accel
+    gyro_x, gyro_y, gyro_z = get_gyro()
+    mag_x, mag_y, mag_z = get_mag()
+    accel_x, accel_y, accel_z = get_accel()
+
+    #if this is more than one, it means the drone is accelerating and therefore it's not reliable because its no longer just gravity
+    accel_magnitude = math.sqrt(accel_x**2 + accel_y**2 + accel_z**2)
+    deviation = abs(accel_magnitude - 1.0) #how far off from 1g is the accel reading?
+    R_accel = R_accel_base * (1 + k * deviation ** 2) #increase accel measurement noise if drone is accelerating
+
+    corrected_gyro_x = gyro_x - bias_x
+    corrected_gyro_y = gyro_y - bias_y
+    corrected_gyro_z = gyro_z - bias_z
+
+    #predict: integrate gyro into current angle estimation
+    now = time.time()
+    dt = now - last_time #sampling as fast as the hardware can handle
+
+    w_quat = [0, corrected_gyro_x, corrected_gyro_y, corrected_gyro_z]
+    q_dot = 0.5 * quat_mult(q, w_quat)
+    q = q + q_dot * dt
+    q = q / np.linalg.norm(q)          # renormalize — new step
+
+    # Update the state transition matrix based on the current state and time step
+    w = np.array([corrected_gyro_x, corrected_gyro_y, corrected_gyro_z])
+    F = update_F(w, dt, F)
+    P = F @ P @ F.T + Q
+
+    predicted_accel = rotate_by_quat(quat_conjugate(q), np.array([0.0, 0.0, 1.0]))
+    predicted_mag = rotate_by_quat(quat_conjugate(q), np.array([1.0, 0.0, 0.0]))
+
+    H = update_H(predicted_accel, predicted_mag, H)
+    H_accel = H[0:3, :]
+    error_state = np.zeros(6)  # Initialize error state vector
+
+    S_accel = H_accel @ P @ H_accel.T + R_accel
+    K_accel = P @ H_accel.T @ np.linalg.inv(S_accel)
+    residual_accel = np.array([accel_x, accel_y, accel_z]) - predicted_accel
+
+    #gate against BASE noise, not the already-inflated adaptive R_accel - otherwise
+    #adaptive R inflates in lockstep with the residual and the gate can never fire
+    #(d_squared asymptotes to ~1/k for large outliers regardless of severity)
+    S_accel_gate = H_accel @ P @ H_accel.T + R_accel_base
+    d_squared = residual_accel.T @ np.linalg.inv(S_accel_gate) @ residual_accel
+
+    if d_squared <= chi2_threshold:
+      error_state = error_state + K_accel @ residual_accel
+      P = (I - K_accel @ H_accel) @ P
+    #else: skip entirely - state and P stay exactly as the predict step left them
+
+    H_mag = H[3:]
+    K_mag = P @ H_mag.T @ np.linalg.inv(H_mag @ P @ H_mag.T + R_mag)
+    residual_mag = np.array([mag_x, mag_y, mag_z]) - predicted_mag
+    error_state = error_state + K_mag @ residual_mag
+    P = (I - K_mag @ H_mag) @ P
+
+    d_theta = error_state[0:3]
+    d_bias  = error_state[3:6]
+
+    bias_x = bias_x + d_bias[0]
+    bias_y = bias_y + d_bias[1]
+    bias_z = bias_z + d_bias[2]
+
+    dq = np.array([1.0, d_theta[0]/2, d_theta[1]/2, d_theta[2]/2])
+    q = quat_mult(q, dq)
+    q = q / np.linalg.norm(q)
+
+    last_time = now
+    time.sleep(0.01) #sleep for 10ms to simulate sensor reading rate

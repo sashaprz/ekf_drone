@@ -30,7 +30,7 @@ Sine-wave ground truth per axis, sensors synthesized from it each step (bias + n
 
 RMS (root-mean-square) error: square each iteration's error, average over the run, square-root back to degrees. One number per filter that summarizes accuracy over a whole run and penalizes big spikes more than a plain average would — the standard metric for comparing estimators.
 
-All three filters run against identical trajectory + sensor stream (same RNG seed), fixed `dt`, 20s.
+All four filters run against identical trajectory + sensor stream (same RNG seed), fixed `dt`, 20s.
 
 ![RMS error comparison](rms_comparison.png)
 
@@ -39,11 +39,15 @@ All three filters run against identical trajectory + sensor stream (same RNG see
 | Original (2, -1, 0.5°/s) | Complementary | 0.954° | 1.249° | 0.327° |
 | Original | Angle-based | 0.445° | 0.460° | 0.230° |
 | Original | Raw-vector + bias | 0.443° | 0.305° | 0.229° |
+| Original | Quaternion MEKF | 0.445° | 0.305° | 0.230° |
 | 10x larger | Complementary | 9.603° | 5.029° | 2.534° |
 | 10x larger | Angle-based | 0.681° | 0.521° | 0.268° |
 | 10x larger | Raw-vector + bias | 0.449° | 0.308° | 0.229° |
+| 10x larger | Quaternion MEKF | 0.452° | 0.308° | 0.231° |
 
-Complementary is already visibly worse at original bias (fixed weight, no computed gain), and falls apart at 10x bias (roll RMS 9.6°) while both EKFs stay well-behaved — raw-vector+bias barely moves at all, since it's actively canceling the bias rather than just tolerating it.
+Complementary is already visibly worse at original bias (fixed weight, no computed gain), and falls apart at 10x bias (roll RMS 9.6°) while all three EKFs stay well-behaved — raw-vector+bias and quaternion MEKF barely move at all, since they're actively canceling the bias rather than just tolerating it.
+
+**Quaternion MEKF (`quaternarions.py`)** uses the same raw-vector + gyro-bias measurement model as `ekf_gyro_bias.py`, but represents attitude as a quaternion instead of Euler angles, with a multiplicative error-state correction (small-angle attitude/bias error tracked in `P`, folded back into the quaternion each step) instead of directly adding the Kalman correction onto roll/pitch/yaw. On this trajectory the RMS numbers match raw-vector+bias to within noise — expected, since it's the same gains and measurement model, just a different attitude parameterization. The payoff isn't accuracy here; it's that Euler angles have a `1/cos(pitch)` singularity at ±90° pitch (gimbal lock) that this trajectory's small rotation amplitudes never approach, while the quaternion form has no such singularity at any orientation.
 
 ## Motion robustness: adaptive R + gating (`ekf.py`, `test_gating.py`)
 

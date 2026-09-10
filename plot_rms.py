@@ -4,25 +4,28 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 axes_labels = ["Roll", "Pitch", "Yaw"]
-filters = ["Complementary", "Angle-based", "Raw-vector + bias"]
+filters = ["Complementary", "Angle-based", "Raw-vector + bias", "Quaternion MEKF"]
 
 data = {
     "Original bias": {
         "Complementary": [0.954, 1.249, 0.327],
         "Angle-based": [0.445, 0.460, 0.230],
         "Raw-vector + bias": [0.443, 0.305, 0.229],
+        "Quaternion MEKF": [0.445, 0.305, 0.230],
     },
     "10x bias": {
         "Complementary": [9.603, 5.029, 2.534],
         "Angle-based": [0.681, 0.521, 0.268],
         "Raw-vector + bias": [0.449, 0.308, 0.229],
+        "Quaternion MEKF": [0.452, 0.308, 0.231],
     },
 }
 
 color_comp = "#1B9E77"
 color_angle = "#2C7BB6"
 color_raw = "#D95F02"
-colors = [color_comp, color_angle, color_raw]
+color_quat = "#7570B3"
+colors = [color_comp, color_angle, color_raw, color_quat]
 ink = "#3A3A3A"
 grid_color = "#DDDDDD"
 
@@ -30,15 +33,15 @@ fig, axs = plt.subplots(1, 2, figsize=(9.5, 4.6)) #own y-scale per panel: comple
 
 for ax, (panel_title, series) in zip(axs, data.items()):
     x = np.arange(len(axes_labels))
-    width = 0.25
+    width = 0.19
     y_max = max(v for vals in series.values() for v in vals) * 1.22
 
     for i, f in enumerate(filters):
-        offset = (i - 1) * width
+        offset = (i - (len(filters) - 1) / 2) * width
         bars = ax.bar(x + offset, series[f], width, label=f, color=colors[i])
         for b in bars:
             ax.text(b.get_x() + b.get_width()/2, b.get_height() + y_max*0.02,
-                     f"{b.get_height():.2f}", ha="center", va="bottom", fontsize=7.5, color=ink)
+                     f"{b.get_height():.2f}", ha="center", va="bottom", fontsize=6.8, color=ink)
 
     ax.set_title(panel_title, fontsize=11, color=ink)
     ax.set_xticks(x)
@@ -54,7 +57,7 @@ for ax, (panel_title, series) in zip(axs, data.items()):
 
 axs[0].set_ylabel("RMS error (degrees)", color=ink)
 handles, labels = axs[0].get_legend_handles_labels()
-fig.legend(handles, labels, loc="upper center", ncol=3, frameon=False, bbox_to_anchor=(0.5, 1.0))
+fig.legend(handles, labels, loc="upper center", ncol=4, frameon=False, bbox_to_anchor=(0.5, 1.0))
 fig.tight_layout(rect=[0, 0, 1, 0.88])
 fig.savefig("rms_comparison.png", dpi=150, facecolor="white")
 print("wrote rms_comparison.png")
