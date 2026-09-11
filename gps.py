@@ -32,6 +32,9 @@ chi2_threshold = 11.34 #chi2 threshold for 3 DOF, 99% confidence interval
 gyro_x_dps = 5 #raw gyro constants, in deg/s - never overwritten by the loop
 gyro_y_dps = 3 #nonzero, to exercise coupling into pitch_dot and (via roll) into yaw_dot
 gyro_z_dps = 0
+
+#accel_x/y/z, the [0,0,1] gravity constant (line 174), the 1.0 in deviation (line 154), and predicted_accel's 
+# [0,0,1] reference vector (line 199) all assume the same 1g-normalized convention and that swapping in real sensor data (m/s², not pre-normalized) means updating all of them together
 accel_x = 0
 accel_y = math.sin(math.radians(10)) #simulate 10 deg roll
 accel_z = math.cos(math.radians(10)) #simulate 10 deg roll
@@ -50,18 +53,21 @@ q = np.array([1.0, 0.0, 0.0, 0.0]) #identity quaternion, [w, x, y, z]
 bias_x = 0
 bias_y = 0
 bias_z = 0
+accel_bias_x = 0
+accel_bias_y = 0
+accel_bias_z = 0
 velocity = np.array([0.0, 0.0, 0.0]) # Initialize velocity
 position = np.array([0.0, 0.0, 0.0])
 
 #filter matrices
-P = np.eye(12) #how uncertain you currently are about each state, and how uncertainties are correlated
-Q = np.diag([0.01, 0.01, 0.01, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6]) #how much new uncertainty is added by the prediction step (how uncertain you are abt gyro)
+P = np.eye(15) #how uncertain you currently are about each state, and how uncertainties are correlated
+Q = np.diag([0.01, 0.01, 0.01, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6]) #how much new uncertainty is added by the prediction step (how uncertain you are abt gyro)
 R_accel_base = np.diag([0.1, 0.1, 0.1]) #how much uncertainty is added by the measurement step (how uncertain you are abt accel/mag)
 R_mag = np.diag([0.1, 0.1, 0.1]) #how much uncertainty is added by the measurement step (how uncertain you are abt accel/mag)
-F = np.eye(12) #state transition matrix, how the state evolves from one step to the next without control input (identity for this case)
-I = np.eye(12) #identity matrix for updating the covariance
-H_accel_mag = np.zeros((6, 12)) #measurement matrix, how the measurements relate to the state
-H_gps = np.zeros((6, 12)) #measurement matrix for GPS, how the measurements relate to the state (position rows 0:3, velocity rows 3:6)
+F = np.eye(15) #state transition matrix, how the state evolves from one step to the next without control input (identity for this case)
+I = np.eye(15) #identity matrix for updating the covariance
+H_accel_mag = np.zeros((6, 15)) #measurement matrix, how the measurements relate to the state
+H_gps = np.zeros((6, 15)) #measurement matrix for GPS, how the measurements relate to the state (position rows 0:3, velocity rows 3:6)
 R_gps = np.diag([1.0, 1.0, 1.0, 0.5, 0.5, 0.5]) #how much uncertainty is added by the GPS measurement step (placeholder - needs tuning). Position and velocity blocks kept separately tunable - GNSS velocity (from Doppler) is often more accurate than position, but noisier at low speed
 
 #timing variables
@@ -123,6 +129,8 @@ def update_F(w, dt, F, q, accel_body):
     #-R(q) @ skew(accel_body) matched the numeric Jacobian to ~1e-6; skew(accel_world) alone did not)
     F[6:9, 0:3] = -dt * quat_to_R(q) @ skew(accel_body)
     F[9:12, 6:9] = dt * np.eye(3)
+    F[12:15, 12:15] = np.eye(3)
+    F[6:9, 12:15] = -dt * quat_to_R(q)
     return F
 
 def update_H_mag_accel(predicted_accel, predicted_mag, H):
@@ -149,19 +157,23 @@ while True:
     mag_x, mag_y, mag_z = get_mag()
     accel_x, accel_y, accel_z = get_accel()
 
-    #adaptive accel noise + bias-corrected gyro
+    #adaptive accel noise + bias-corrected gyro + accel
     accel_magnitude = math.sqrt(accel_x**2 + accel_y**2 + accel_z**2)
     deviation = abs(accel_magnitude - 1.0) #how far off from 1g is the accel reading?
     R_accel = R_accel_base * (1 + k * deviation ** 2) #increase accel measurement noise if drone is accelerating
     corrected_gyro_x = gyro_x - bias_x
     corrected_gyro_y = gyro_y - bias_y
     corrected_gyro_z = gyro_z - bias_z
+    
+    corrected_accel_x = accel_x - accel_bias_x
+    corrected_accel_y = accel_y - accel_bias_y
+    corrected_accel_z = accel_z - accel_bias_z
 
     #predict: integrate gyro into current angle estimation
     now = time.time()
     dt = now - last_time #sampling as fast as the hardware can handle
 
-    error_state = np.zeros(12)  # Initialize error state vector
+    error_state = np.zeros(15)  # Initialize error state vector
 
     w_quat = [0, corrected_gyro_x, corrected_gyro_y, corrected_gyro_z]
     q_dot = 0.5 * quat_mult(q, w_quat)
@@ -169,15 +181,15 @@ while True:
     q = q / np.linalg.norm(q)          # renormalize — new step
 
     #velocity/position prediction
-    accel = np.array([accel_x, accel_y, accel_z])
-    accel_world = rotate_by_quat(q, accel)
+    corrected_accel = [corrected_accel_x, corrected_accel_y, corrected_accel_z]
+    accel_world = rotate_by_quat(q, corrected_accel)
     accel_world = accel_world - [0, 0, 1] #subtract gravity
     velocity += accel_world * dt
     position += velocity * dt
 
     # Update the state transition matrix based on the current state and time step
     w = np.array([corrected_gyro_x, corrected_gyro_y, corrected_gyro_z])
-    F = update_F(w, dt, F, q, accel)
+    F = update_F(w, dt, F, q, corrected_accel)
     P = F @ P @ F.T + Q
 
     if now - last_gps_time >= gps_period:
@@ -204,7 +216,7 @@ while True:
     #accel correction
     S_accel = H_accel @ P @ H_accel.T + R_accel
     K_accel = P @ H_accel.T @ np.linalg.inv(S_accel)
-    residual_accel = np.array([accel_x, accel_y, accel_z]) - predicted_accel
+    residual_accel = np.array([corrected_accel_x, corrected_accel_y, corrected_accel_z]) - predicted_accel
     #gate against BASE noise, not the already-inflated adaptive R_accel - otherwise
     #adaptive R inflates in lockstep with the residual and the gate can never fire
     #(d_squared asymptotes to ~1/k for large outliers regardless of severity)
@@ -227,10 +239,14 @@ while True:
     d_bias  = error_state[3:6]
     d_velocity = error_state[6:9]
     d_position = error_state[9:12]
+    d_accel_bias = error_state[12:15]
 
     bias_x = bias_x + d_bias[0]
     bias_y = bias_y + d_bias[1]
     bias_z = bias_z + d_bias[2]
+    accel_bias_x += d_accel_bias[0]
+    accel_bias_y += d_accel_bias[1]
+    accel_bias_z += d_accel_bias[2]
 
     dq = np.array([1.0, d_theta[0]/2, d_theta[1]/2, d_theta[2]/2])
     q = quat_mult(q, dq)
