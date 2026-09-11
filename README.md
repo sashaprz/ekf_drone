@@ -61,3 +61,16 @@ Re-derived the raw-vector + bias EKF with a quaternion attitude state (multiplic
 | With gating | 10.06° | 10.28° | Immediate |
 
 Gating only works because it checks the residual against the *base* noise, not the already-inflated adaptive `R` — gating against the inflated value let the spike pass every time (adaptive `R` grows in lockstep with the outlier, so the Mahalanobis distance never crosses the threshold no matter how extreme the reading is).
+
+## GPS position/velocity tracking (`gps.py`, `test_gps_tracking.py`)
+
+Extends the quaternion MEKF's error state to 12 dimensions (adds velocity + position), predicting from gravity-compensated world-frame acceleration and correcting with GPS position + velocity gated to a realistic ~5Hz, instead of every IMU tick.
+
+| Scenario | Position RMS (GPS) | Position RMS (no GPS) |
+|---|---|---|
+| Gentle accel, clean sensor | 0.213 m | 1.701 m |
+| Aggressive accel, clean sensor | 0.012 m | 0.098 m |
+| Gentle accel, with accel bias | 0.200 m | 1.617 m |
+| Aggressive accel, with accel bias | 0.025 m | 0.256 m |
+
+GPS cuts position error 8-10x across the board; a 10°-tilted version of each scenario matches these numbers exactly, confirming `update_F`'s attitude/acceleration coupling handles a non-identity attitude correctly.
