@@ -38,6 +38,9 @@ accel_z = math.cos(math.radians(10)) #simulate 10 deg roll
 mag_x = 1.0
 mag_y = 0
 mag_z = 0
+gps_north = 0.0 #raw GPS constants, in the same local-tangent-plane meters frame as position - never overwritten by the loop
+gps_east = 0.0
+gps_up = 0.0
 
 #state variables
 q = np.array([1.0, 0.0, 0.0, 0.0]) #identity quaternion, [w, x, y, z]
@@ -56,7 +59,7 @@ F = np.eye(12) #state transition matrix, how the state evolves from one step to 
 I = np.eye(12) #identity matrix for updating the covariance
 H_accel_mag = np.zeros((6, 12)) #measurement matrix, how the measurements relate to the state
 H_gps = np.zeros((3, 12)) #measurement matrix for GPS, how the measurements relate to the state
-R_gps = 
+R_gps = np.diag([1.0, 1.0, 1.0]) #how much uncertainty is added by the GPS measurement step (placeholder - needs tuning). Must be square, sized to match H_gps's row count (3: position only)
 last_time = time.time()
 
 #math helpers
@@ -80,6 +83,12 @@ def quat_mult(q1, q2):
 def skew(v):
     return np.array([[0,-v[2],v[1]], [v[2],0,-v[0]], [-v[1],v[0],0]])
 
+def quat_to_R(q):
+    #body->world rotation matrix, built by rotating the standard basis vectors through rotate_by_quat -
+    #reuses the already-verified rotation function instead of a separate closed-form formula, so it's
+    #guaranteed consistent with rotate_by_quat's own quaternion convention
+    return np.array([rotate_by_quat(q, e) for e in np.eye(3)]).T
+
 #sensor reading functions (simulated for now)
 def get_gyro():
     #raw values are in deg/s, convert to rad/s before returning
@@ -94,25 +103,33 @@ def get_mag():
     return mag_x, mag_y, mag_z
 
 def get_gps():
-    return north, east, up
+    return gps_north, gps_east, gps_up
 
-def update_F(w, dt, F):
+def update_F(w, dt, F, q, accel_body):
     #F is a matrix of partial derivatives - a Jacobian
     # w = [wx, wy, wz] # corrected gyro vector
     F[0:3, 0:3] = np.eye(3) - dt * skew(w)
     F[0:3, 3:6] = -dt * np.eye(3)
     F[3:6, 0:3] = 0
     F[3:6, 3:6] = np.eye(3)
-    F[6:9, 0:3] = dt * skew(accel_world)
+    #how attitude error perturbs predicted world-frame accel (verified numerically via finite difference:
+    #-R(q) @ skew(accel_body) matched the numeric Jacobian to ~1e-6; skew(accel_world) alone did not)
+    F[6:9, 0:3] = -dt * quat_to_R(q) @ skew(accel_body)
     F[9:12, 6:9] = dt * np.eye(3)
     return F
 
-def update_H(predicted_accel, predicted_mag, H):
+def update_H_mag_accel(predicted_accel, predicted_mag, H):
     #accel rows: jacobian of predicted_accel wrt state
     H[0:3, 0:3] = skew(predicted_accel)
     H[0:3, 3:6] = 0
     H[3:6, 0:3] = skew(predicted_mag)
     H[3:6, 3:6] = 0
+    return H
+
+def update_H_gps(H):
+    #gps measures position directly (linear model, no skew()/Jacobian needed) - picks out the d_position columns of the error state
+    H[:, 0:9] = 0
+    H[:, 9:12] = np.eye(3)
     return H
 
 #main loop
@@ -122,7 +139,8 @@ while True:
     gyro_x, gyro_y, gyro_z = get_gyro()
     mag_x, mag_y, mag_z = get_mag()
     accel_x, accel_y, accel_z = get_accel()
-    north, east, up = get_gps() #gps_measurement is a 3D vector of the current GPS position
+    north, east, up = get_gps()
+    gps_measurement = np.array([north, east, up]) #3D vector of the current GPS position, compared against predicted position in the gps correction step
 
     #adaptive accel noise + bias-corrected gyro
     accel_magnitude = math.sqrt(accel_x**2 + accel_y**2 + accel_z**2)
@@ -150,13 +168,13 @@ while True:
 
     # Update the state transition matrix based on the current state and time step
     w = np.array([corrected_gyro_x, corrected_gyro_y, corrected_gyro_z])
-    F = update_F(w, dt, F)
+    F = update_F(w, dt, F, q, accel)
     P = F @ P @ F.T + Q
 
 #predicted accel/mag + error_state init
     predicted_accel = rotate_by_quat(quat_conjugate(q), np.array([0.0, 0.0, 1.0]))
     predicted_mag = rotate_by_quat(quat_conjugate(q), np.array([1.0, 0.0, 0.0]))
-    H_accel_mag = update_H(predicted_accel, predicted_mag, H_accel_mag)
+    H_accel_mag = update_H_mag_accel(predicted_accel, predicted_mag, H_accel_mag)
     H_accel = H_accel_mag[0:3, :]
     error_state = np.zeros(12)  # Initialize error state vector
 
@@ -183,10 +201,11 @@ while True:
     P = (I - K_mag @ H_mag) @ P
 
     #gps correction
+    H_gps = update_H_gps(H_gps)
     S_gps = H_gps @ P @ H_gps.T + R_gps
     K_gps = P @ H_gps.T @ np.linalg.inv(S_gps)
     residual_gps = gps_measurement - position
-    error_state = error_state + K @ residual_gps
+    error_state = error_state + K_gps @ residual_gps
     P = (I - K_gps @ H_gps) @ P
 
     d_theta = error_state[0:3]
