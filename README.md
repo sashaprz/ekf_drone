@@ -1,6 +1,6 @@
 # python_drone
 
-Attitude estimation for a drone from gyro + accelerometer + magnetometer — complementary filter vs. two EKF designs.
+Attitude and position estimation for a drone from gyro + accelerometer + magnetometer + GPS — a complementary filter vs. a progression of EKF designs, from Euler-angle to quaternion attitude, adaptive noise + gating, and GPS-fused position/velocity tracking.
 
 **Gyro bias**: a real gyro doesn't read exactly zero at rest — manufacturing imperfections, temperature drift, and vibration give it a small persistent offset that isn't true rotation. Left uncorrected it integrates into steadily growing angle error, which is why the better filters below estimate and subtract it.
 
@@ -45,9 +45,9 @@ All three filters run against identical trajectory + sensor stream (same RNG see
 
 Complementary is already visibly worse at original bias (fixed weight, no computed gain), and falls apart at 10x bias (roll RMS 9.6°) while both EKFs stay well-behaved — raw-vector+bias barely moves at all, since it's actively canceling the bias rather than just tolerating it.
 
-## Quaternion attitude (`quaternarions.py`)
+## From EKF to MEKF: quaternion attitude (`quaternarions.py`)
 
-Re-derived the raw-vector + bias EKF with a quaternion attitude state (multiplicative error-state correction) instead of Euler angles to avoid gimbal lock, and it performed essentially identically on the RMS test (~0.445°/0.305°/0.230° roll/pitch/yaw vs. 0.443/0.305/0.229 for the Euler version) — same model and gains, just a different attitude parameterization, so no accuracy difference was expected.
+Switched the attitude state from Euler angles to a quaternion, which turns this into a multiplicative EKF (MEKF): a quaternion has 4 numbers for only 3 rotational degrees of freedom, so it can't be corrected by plain vector addition the way Euler angles can. Instead, the Kalman math (`P`, `K`) runs on a 3-dimensional small-angle error state, which then gets folded onto the quaternion multiplicatively and renormalized — this avoids gimbal lock (no singular orientation, unlike Euler angles) and keeps the covariance math well-posed instead of operating on a redundant, constrained state. It performed essentially identically on the RMS test (~0.445°/0.305°/0.230° vs. 0.443/0.305/0.229 for the Euler version), which is expected — same underlying model, just a numerically better-behaved state representation.
 
 ## Motion robustness: adaptive R + gating (`ekf.py`, `test_gating.py`)
 
