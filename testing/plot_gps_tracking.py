@@ -19,8 +19,8 @@ def style_axis(ax):
     ax.set_axisbelow(True)
 
 #---- trajectory plot: gentle accel + accel bias - the clearest illustration of drift vs. correction ----
-_, _, log_with = run(gps_enabled=True, accel_mag=1.0, bias_error=0.05)
-_, _, log_without = run(gps_enabled=False, accel_mag=1.0, bias_error=0.05)
+_, _, log_with, _ = run(gps_enabled=True, accel_mag=1.0, bias_error=0.05)
+_, _, log_without, _ = run(gps_enabled=False, accel_mag=1.0, bias_error=0.05)
 
 t = [row[0] for row in log_with]
 pos_true = [row[2] for row in log_with]
@@ -50,8 +50,8 @@ scenarios = [
 
 rms_gps, rms_nogps = [], []
 for label, accel_mag, bias_error, tilt in scenarios:
-    rp_with, _, _ = run(gps_enabled=True, accel_mag=accel_mag, bias_error=bias_error, roll_tilt_deg=tilt)
-    rp_without, _, _ = run(gps_enabled=False, accel_mag=accel_mag, bias_error=bias_error, roll_tilt_deg=tilt)
+    rp_with, _, _, _ = run(gps_enabled=True, accel_mag=accel_mag, bias_error=bias_error, roll_tilt_deg=tilt)
+    rp_without, _, _, _ = run(gps_enabled=False, accel_mag=accel_mag, bias_error=bias_error, roll_tilt_deg=tilt)
     rms_gps.append(rp_with)
     rms_nogps.append(rp_without)
 

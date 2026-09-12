@@ -69,12 +69,23 @@ def update_H(predicted_accel, predicted_mag, H):
     H[3:6, 6:9] = 0
     return H
 
-def calibrate(get_gyro, get_accel, get_mag, dwell_steps=200, wiggle_steps=400, dt=0.01):
+def calibrate(get_gyro, get_accel, get_mag, dwell_steps=200, wiggle_steps=400, dt=0.01,
+              gravity=1.0, accel_noise_var=0.1, mag_noise_var=0.1):
     """
     Runs dwell_steps + wiggle_steps predict/correct cycles against the given sensor
     readers (no wiggle command is issued here - that has to come from whatever's
     driving get_gyro/get_accel/get_mag, e.g. a real pre-arm maneuver). Returns
     (q, gyro_bias, accel_bias) to seed the main navigation filter with.
+
+    gravity: the magnitude get_accel() reports at rest (1.0 if it's 1g-normalized, or
+    the real ~9.80665 m/s² if it isn't) - must match the caller's convention, or the
+    residual will be dominated by this mismatch rather than the actual attitude/bias
+    error, and accel_bias will absorb the difference almost entirely.
+
+    accel_noise_var/mag_noise_var: R for the accel/mag corrections - the defaults (0.1)
+    assume 1g-normalized accel; pass the caller's actual noise variance (e.g. accel
+    noise-std² in the same units as `gravity`) when it isn't, or the filter will be
+    badly over/under-confident about how much to trust each reading.
     """
     q = np.array([1.0, 0.0, 0.0, 0.0])
     gyro_bias = np.zeros(3)
@@ -82,8 +93,8 @@ def calibrate(get_gyro, get_accel, get_mag, dwell_steps=200, wiggle_steps=400, d
 
     P = np.eye(9)
     Q = np.diag([0.01,0.01,0.01, 1e-6,1e-6,1e-6, 1e-6,1e-6,1e-6])
-    R_accel = np.diag([0.1,0.1,0.1])
-    R_mag = np.diag([0.1,0.1,0.1])
+    R_accel = np.diag([accel_noise_var]*3)
+    R_mag = np.diag([mag_noise_var]*3)
     F = np.eye(9)
     I = np.eye(9)
     H = np.zeros((6,9))
@@ -104,7 +115,7 @@ def calibrate(get_gyro, get_accel, get_mag, dwell_steps=200, wiggle_steps=400, d
         F = update_F(corrected_gyro, dt, F)
         P = F @ P @ F.T + Q
 
-        predicted_accel = rotate_by_quat(quat_conjugate(q), np.array([0.0, 0.0, 1.0]))
+        predicted_accel = rotate_by_quat(quat_conjugate(q), np.array([0.0, 0.0, gravity]))
         predicted_mag = rotate_by_quat(quat_conjugate(q), np.array([1.0, 0.0, 0.0]))
         H = update_H(predicted_accel, predicted_mag, H)
         H_accel = H[0:3, :]
