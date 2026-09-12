@@ -27,7 +27,9 @@ import calibration
 
 #variable definition
 k = 1 #how agressively to increase accel measurement noise when drone is accelerating.
-chi2_threshold = 11.34 #chi2 threshold for 3 DOF, 99% confidence interval
+chi2_threshold = 11.34 #chi2 threshold for 3 DOF, 99% confidence interval - accel and mag corrections (3 DOF each)
+chi2_threshold_gps = 16.81 #chi2 threshold for 6 DOF, 99% confidence interval - GPS correction (position+velocity, 6 DOF)
+GRAVITY = 9.80665
 
 #measurement variables
 gyro_x_dps = 5 #raw gyro constants, in deg/s - never overwritten by the loop
@@ -37,8 +39,8 @@ gyro_z_dps = 0
 #accel_x/y/z, the [0,0,1] gravity constant (line 174), the 1.0 in deviation (line 154), and predicted_accel's 
 # [0,0,1] reference vector (line 199) all assume the same 1g-normalized convention and that swapping in real sensor data (m/s², not pre-normalized) means updating all of them together
 accel_x = 0
-accel_y = math.sin(math.radians(10)) #simulate 10 deg roll
-accel_z = math.cos(math.radians(10)) #simulate 10 deg roll
+accel_y = GRAVITY * math.sin(math.radians(10)) #simulate 10 deg roll
+accel_z = GRAVITY * math.cos(math.radians(10)) #simulate 10 deg roll
 mag_x = 1.0
 mag_y = 0
 mag_z = 0
@@ -176,7 +178,7 @@ while True:
 
     #adaptive accel noise + bias-corrected gyro + accel
     accel_magnitude = math.sqrt(accel_x**2 + accel_y**2 + accel_z**2)
-    deviation = abs(accel_magnitude - 1.0) #how far off from 1g is the accel reading?
+    deviation = abs(accel_magnitude - GRAVITY) #how far off from 1g is the accel reading?
     R_accel = R_accel_base * (1 + k * deviation ** 2) #increase accel measurement noise if drone is accelerating
     corrected_gyro_x = gyro_x - bias_x
     corrected_gyro_y = gyro_y - bias_y
@@ -202,7 +204,7 @@ while True:
     #velocity/position prediction
     corrected_accel = [corrected_accel_x, corrected_accel_y, corrected_accel_z]
     accel_world = rotate_by_quat(q, corrected_accel)
-    accel_world = accel_world - [0, 0, 1] #subtract gravity
+    accel_world = accel_world - [0, 0, GRAVITY] #subtract gravity
     velocity += accel_world * dt
     position += velocity * dt
 
@@ -222,12 +224,20 @@ while True:
         K_gps = P @ H_gps.T @ np.linalg.inv(S_gps) #computing kalman fain
         predicted_gps = np.concatenate([position, velocity]) #what you expect gps to report
         residual_gps = gps_measurement - predicted_gps #what gps reported vs what you expected
-        error_state = error_state + K_gps @ residual_gps #apply the correction. 
-        P = (I - K_gps @ H_gps) @ P #update the covariance to reflect that youre now more certain, because you added a new measurement
+        #gate against a bad fix (multipath, momentary bad geometry) - R_gps isn't
+        #adaptively inflated like R_accel, so no separate "base" R is needed here
+        d_squared_gps = residual_gps.T @ np.linalg.inv(S_gps) @ residual_gps
+
+        if d_squared_gps <= chi2_threshold_gps:
+            error_state = error_state + K_gps @ residual_gps #apply the correction.
+            #Joseph form - numerically robust to floating-point drift (keeps P symmetric/PSD),
+            #vs the algebraically-equivalent but fragile (I-KH)@P
+            P = (I - K_gps @ H_gps) @ P @ (I - K_gps @ H_gps).T + K_gps @ R_gps @ K_gps.T
+        #else: skip entirely - state and P stay exactly as the predict step left them
         last_gps_time = now
 
     #predicted accel/mag + error_state init
-    predicted_accel = rotate_by_quat(quat_conjugate(q), np.array([0.0, 0.0, 1.0]))
+    predicted_accel = rotate_by_quat(quat_conjugate(q), np.array([0.0, 0.0, GRAVITY]))
     predicted_mag = rotate_by_quat(quat_conjugate(q), np.array([1.0, 0.0, 0.0]))
     H_accel_mag = update_H_mag_accel(predicted_accel, predicted_mag, H_accel_mag)
     H_accel = H_accel_mag[0:3, :]
@@ -244,15 +254,22 @@ while True:
 
     if d_squared <= chi2_threshold:
       error_state = error_state + K_accel @ residual_accel
-      P = (I - K_accel @ H_accel) @ P
+      P = (I - K_accel @ H_accel) @ P @ (I - K_accel @ H_accel).T + K_accel @ R_accel @ K_accel.T
     #else: skip entirely - state and P stay exactly as the predict step left them
 
     #mag correction
     H_mag = H_accel_mag[3:]
-    K_mag = P @ H_mag.T @ np.linalg.inv(H_mag @ P @ H_mag.T + R_mag)
+    S_mag = H_mag @ P @ H_mag.T + R_mag
+    K_mag = P @ H_mag.T @ np.linalg.inv(S_mag)
     residual_mag = np.array([mag_x, mag_y, mag_z]) - predicted_mag
-    error_state = error_state + K_mag @ residual_mag
-    P = (I - K_mag @ H_mag) @ P
+    #gate against magnetic interference (motors/ESCs) - R_mag is static, not
+    #adaptively inflated like R_accel, so no separate "base" R is needed here
+    d_squared_mag = residual_mag.T @ np.linalg.inv(S_mag) @ residual_mag
+
+    if d_squared_mag <= chi2_threshold:
+        error_state = error_state + K_mag @ residual_mag
+        P = (I - K_mag @ H_mag) @ P @ (I - K_mag @ H_mag).T + K_mag @ R_mag @ K_mag.T
+    #else: skip entirely - state and P stay exactly as the predict step left them
 
     d_theta = error_state[0:3]
     d_bias  = error_state[3:6]

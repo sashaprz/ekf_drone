@@ -70,3 +70,17 @@ Extends the quaternion MEKF's error state to 12 dimensions (adds velocity + posi
 ![GPS tracking RMS comparison](testing/gps_tracking_rms.png)
 
 GPS cuts position error 8-10x across the board; a 10°-tilted version of each scenario matches these numbers exactly, confirming `update_F`'s attitude/acceleration coupling handles a non-identity attitude correctly.
+
+## Gating all three corrections (`gps.py`, `test_gates.py`)
+
+`gps.py` gates every correction source, not just accel: accel and mag each get a 3-DOF chi-squared test on their residual, and GPS gets its own 6-DOF version (it corrects position + velocity jointly). Any correction that fails its gate is skipped entirely for that tick — state and `P` are left exactly as the predict step produced them, rather than clamped or partially applied.
+
+`test_gates.py` checks two things: that the gates stay quiet on clean data (a gate that fires on legitimate readings is worse than no gate at all), and that they actually catch a bad reading the way the original accel gate did. It runs a stationary ground truth so any deviation is unambiguous, injects a +50m GPS multipath-style spike and a 90°-wrong magnetometer reading, and compares gates on vs. off:
+
+| | GPS rejected | Mag rejected | Peak position error | Peak attitude error |
+|---|---|---|---|---|
+| Clean run (no outliers) | 0/0 | 0/0 | — | — |
+| Gates ON | 1/1 | 1/1 | 0.00 m | 0.00° |
+| Gates OFF | 0/1 | 0/1 | 9.82 m | 15.53° |
+
+With gates on, both outliers are caught and the state never moves. Without them, the GPS spike alone injects ~9.4m of position error that takes many correction cycles to bleed off, and the mag spike's ~15.5° of attitude error keeps doing damage afterward — the corrupted attitude estimate misreads subsequent accelerometer readings, so position keeps drifting for several ticks even though the bad reading was magnetometer, not GPS.
