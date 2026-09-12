@@ -23,6 +23,7 @@ the hypothesized orietnation you're comparing accel/mag against is the gyro's me
 import time
 import math
 import numpy as np
+import calibration
 
 #variable definition
 k = 1 #how agressively to increase accel measurement noise when drone is accelerating.
@@ -48,7 +49,9 @@ gps_vel_north = 0.0 #raw GPS velocity constants (from Doppler, same units as vel
 gps_vel_east = 0.0
 gps_vel_up = 0.0
 
-#state variables
+#state variables - placeholders, overwritten by the pre-flight calibration call below
+#(get_gyro/get_accel/get_mag have to be defined first, so the actual calibrate() call
+#happens further down, right after those are defined)
 q = np.array([1.0, 0.0, 0.0, 0.0]) #identity quaternion, [w, x, y, z]
 bias_x = 0
 bias_y = 0
@@ -118,6 +121,18 @@ def get_mag():
 def get_gps():
     return gps_north, gps_east, gps_up, gps_vel_north, gps_vel_east, gps_vel_up
 
+#pre-flight calibration - seeds q/gyro_bias/accel_bias instead of starting from
+#identity/zero (see calibration.py: accel_bias and attitude tilt are otherwise
+#unobservable from a single fixed orientation, which is exactly what the accel_bias
+#column in update_H_mag_accel below needs at least a decent starting point for).
+#NOTE: get_gyro/get_accel/get_mag here just return this file's constant "in-flight"
+#sensor stubs (gyro_x_dps etc. never stop, there's no separate stationary phase
+#simulated yet) - so this wiring doesn't get the wiggle's disambiguation benefit
+#until these sensor functions (or real hardware) actually go through a stationary
+#dwell + wiggle before the main loop starts.
+q, (bias_x, bias_y, bias_z), (accel_bias_x, accel_bias_y, accel_bias_z) = \
+    calibration.calibrate(get_gyro, get_accel, get_mag)
+
 def update_F(w, dt, F, q, accel_body):
     #F is a matrix of partial derivatives - a Jacobian
     # w = [wx, wy, wz] # corrected gyro vector
@@ -137,8 +152,10 @@ def update_H_mag_accel(predicted_accel, predicted_mag, H):
     #accel rows: jacobian of predicted_accel wrt state
     H[0:3, 0:3] = skew(predicted_accel)
     H[0:3, 3:6] = 0
+    H[0:3, 12:15] = np.eye(3)   # accel rows' Jacobian wrt accel_bias error
     H[3:6, 0:3] = skew(predicted_mag)
     H[3:6, 3:6] = 0
+    H[3:6, 12:15] = 0            # explicit, for symmetry — mag doesn't see accel bias
     return H
 
 def update_H_gps(H):
@@ -175,6 +192,8 @@ while True:
 
     error_state = np.zeros(15)  # Initialize error state vector
 
+    #using gyro to advance the attitude estimation forward by one timestep. 
+    #multiplying 2 unit quaternions
     w_quat = [0, corrected_gyro_x, corrected_gyro_y, corrected_gyro_z]
     q_dot = 0.5 * quat_mult(q, w_quat)
     q = q + q_dot * dt
@@ -198,13 +217,13 @@ while True:
         gps_measurement = np.array([north, east, up, vel_north, vel_east, vel_up]) #current GPS position + velocity, compared against predicted position/velocity in the gps correction step
         
         #gps correction
-        H_gps = update_H_gps(H_gps)
-        S_gps = H_gps @ P @ H_gps.T + R_gps
-        K_gps = P @ H_gps.T @ np.linalg.inv(S_gps)
-        predicted_gps = np.concatenate([position, velocity])
-        residual_gps = gps_measurement - predicted_gps
-        error_state = error_state + K_gps @ residual_gps
-        P = (I - K_gps @ H_gps) @ P
+        H_gps = update_H_gps(H_gps) #builds measurment jacobian for this update
+        S_gps = H_gps @ P @ H_gps.T + R_gps #how much uncertainty you'd expect in residual, combining current uncertainty with sensor noise R_gps
+        K_gps = P @ H_gps.T @ np.linalg.inv(S_gps) #computing kalman fain
+        predicted_gps = np.concatenate([position, velocity]) #what you expect gps to report
+        residual_gps = gps_measurement - predicted_gps #what gps reported vs what you expected
+        error_state = error_state + K_gps @ residual_gps #apply the correction. 
+        P = (I - K_gps @ H_gps) @ P #update the covariance to reflect that youre now more certain, because you added a new measurement
         last_gps_time = now
 
     #predicted accel/mag + error_state init
