@@ -84,3 +84,20 @@ GPS cuts position error 8-10x across the board; a 10°-tilted version of each sc
 | Gates OFF | 0/1 | 0/1 | 9.82 m | 15.53° |
 
 With gates on, both outliers are caught and the state never moves. Without them, the GPS spike alone injects ~9.4m of position error that takes many correction cycles to bleed off, and the mag spike's ~15.5° of attitude error keeps doing damage afterward — the corrupted attitude estimate misreads subsequent accelerometer readings, so position keeps drifting for several ticks even though the bad reading was magnetometer, not GPS.
+
+## Pooled vs. sequential corrections (`gps.py`, `calibration.py`, `test_gate_monte_carlo.py`)
+
+Before this fix, `gps.py` computed GPS, accel, and mag corrections against the *same* attitude estimate `q̂`, summed all three into one `error_state`, and injected them once at the end of the tick. That's a fine simplification for a linear system - batching and processing sequentially are mathematically identical there, sequential is just cheaper. It's not fine for an EKF, where `H` is a function of the current `q̂`: two large-gain corrections (accel and mag) evaluated against the same *stale* linearization can double-count and overcorrect, especially right after startup when `P` is still large and every gain is aggressive.
+
+That's exactly what happened. A Monte Carlo sweep (`test_gate_monte_carlo.py`, 20 seeds, no injected outliers) found that starting from `P0 = np.eye(15)`, the pooled version had a **6/20 (30%) chance of permanently locking the accel gate on** - one bad startup correction would throw attitude far enough off that every subsequent legitimate accel reading looked like an outlier, and the gate (correctly) kept protecting the now-wrong state from ever being fixed.
+
+The fix: apply each correction immediately (`apply_correction()`) and re-linearize before the next one, instead of pooling. GPS updates `q̂` first; accel's `predicted_accel` is computed from *that* `q̂`, not the pre-tick one; mag's `predicted_mag` is computed from the `q̂` accel's correction just produced. This is the same math a linear Kalman filter would call "sequential processing," just carried through to the nonlinear case by actually re-linearizing between steps - closer to an iterated EKF than a batch update.
+
+| | Lockout rate (20 trials, `P0 = eye(15)`) |
+|---|---|
+| Pooled (before) | 6/20 (30%) |
+| Sequential (after) | 0/20 |
+
+The lockout also disappears with a better-tuned `P0` alone (seeded from `calibration.calibrate()`'s own converged covariance instead of a blind identity guess - see `calibration.py`), which is what most of the practical improvement comes from day to day. But re-running the *sequential* fix against the original bad `P0 = eye(15)` still gave 0/20 lockouts - proof the correction-ordering fix removes the actual overcorrection mechanism, not just one trigger for it. Belt and suspenders: a good `P0` avoids the failure mode most of the time; sequential correction closes it structurally, in case `P` ever grows large again mid-flight (sensor dropout, an extended gyro-only stretch).
+
+Gate calibration on clean (outlier-free) data improved alongside it - expected false-rejection rate is ~1% (99% CI threshold); with both fixes in place, empirical rates came out at 0.08% (accel), 0.42% (mag), 0.89% (GPS), down from 24.8% / 58.6% / 77.5% beforehand.
