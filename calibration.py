@@ -58,15 +58,18 @@ def update_F(w, dt, F):
     F[0:3, 3:6] = -dt * np.eye(3)
     return F
 
-def update_H(predicted_accel, predicted_mag, H):
+def update_H_accel(predicted_accel, H):
     H[0:3, 0:3] = skew(predicted_accel)
     H[0:3, 3:6] = 0
     H[0:3, 6:9] = np.eye(3)   #accel rows' Jacobian wrt accel_bias - only separable
                               #from H[0:3,0:3]'s attitude term because the wiggle
                               #phase varies predicted_accel while accel_bias stays fixed
-    H[3:6, 0:3] = skew(predicted_mag)
-    H[3:6, 3:6] = 0
-    H[3:6, 6:9] = 0
+    return H
+
+def update_H_mag(predicted_mag, H):
+    H[0:3, 0:3] = skew(predicted_mag)
+    H[0:3, 3:6] = 0
+    H[0:3, 6:9] = 0
     return H
 
 def calibrate(get_gyro, get_accel, get_mag, dwell_steps=200, wiggle_steps=400, dt=0.01,
@@ -75,7 +78,14 @@ def calibrate(get_gyro, get_accel, get_mag, dwell_steps=200, wiggle_steps=400, d
     Runs dwell_steps + wiggle_steps predict/correct cycles against the given sensor
     readers (no wiggle command is issued here - that has to come from whatever's
     driving get_gyro/get_accel/get_mag, e.g. a real pre-arm maneuver). Returns
-    (q, gyro_bias, accel_bias) to seed the main navigation filter with.
+    (q, gyro_bias, accel_bias, P) to seed the main navigation filter with - P is the
+    converged 9x9 covariance (attitude, gyro_bias, accel_bias blocks, in that order),
+    NOT just np.eye(9): a blind identity guess for the main filter's own P is what let
+    the pooled accel+mag correction overcorrect badly enough to lock the accel gate on
+    ~30% of cold starts (see testing/test_gate_monte_carlo.py) - actually reflecting
+    how much calibration narrowed things down avoids that. The caller (gps.py) has to
+    map this 9x9 block layout onto its own 15x15 P (which also has velocity/position),
+    since calibration never modeled those.
 
     gravity: the magnitude get_accel() reports at rest (1.0 if it's 1g-normalized, or
     the real ~9.80665 m/s² if it isn't) - must match the caller's convention, or the
@@ -97,7 +107,22 @@ def calibrate(get_gyro, get_accel, get_mag, dwell_steps=200, wiggle_steps=400, d
     R_mag = np.diag([mag_noise_var]*3)
     F = np.eye(9)
     I = np.eye(9)
-    H = np.zeros((6,9))
+    H_accel = np.zeros((3,9))
+    H_mag = np.zeros((3,9))
+
+    def apply_correction(correction):
+        #injects immediately and re-normalizes q, rather than pooling accel+mag against
+        #one frozen q and injecting once - see gps.py's apply_correction for why this
+        #matters (the pooled version let two large-gain corrections double-count against
+        #the same stale linearization when P was large, which is exactly the situation
+        #at the start of calibration before anything has converged yet)
+        nonlocal q, gyro_bias, accel_bias
+        d_theta = correction[0:3]
+        gyro_bias = gyro_bias + correction[3:6]
+        accel_bias = accel_bias + correction[6:9]
+        dq = np.array([1.0, d_theta[0]/2, d_theta[1]/2, d_theta[2]/2])
+        q = quat_mult(q, dq)
+        q = q / np.linalg.norm(q)
 
     for _ in range(dwell_steps + wiggle_steps):
         gyro_x, gyro_y, gyro_z = get_gyro()
@@ -115,31 +140,26 @@ def calibrate(get_gyro, get_accel, get_mag, dwell_steps=200, wiggle_steps=400, d
         F = update_F(corrected_gyro, dt, F)
         P = F @ P @ F.T + Q
 
+        #accel correction
         predicted_accel = rotate_by_quat(quat_conjugate(q), np.array([0.0, 0.0, gravity]))
-        predicted_mag = rotate_by_quat(quat_conjugate(q), np.array([1.0, 0.0, 0.0]))
-        H = update_H(predicted_accel, predicted_mag, H)
-        H_accel = H[0:3, :]
-        H_mag = H[3:6, :]
-
+        H_accel = update_H_accel(predicted_accel, H_accel)
         K_accel = P @ H_accel.T @ np.linalg.inv(H_accel @ P @ H_accel.T + R_accel)
         residual_accel = corrected_accel - predicted_accel
-        error_state = K_accel @ residual_accel
-        P = (I - K_accel @ H_accel) @ P
+        apply_correction(K_accel @ residual_accel)
+        #Joseph form - numerically robust to floating-point drift (keeps P symmetric/PSD).
+        #Matters here specifically because gps.py now seeds its own P from this function's
+        #returned P - a P that's silently lost PSD would corrupt the main loop from the start.
+        P = (I - K_accel @ H_accel) @ P @ (I - K_accel @ H_accel).T + K_accel @ R_accel @ K_accel.T
 
+        #mag correction - predicted_mag uses q AFTER the accel correction just applied
+        predicted_mag = rotate_by_quat(quat_conjugate(q), np.array([1.0, 0.0, 0.0]))
+        H_mag = update_H_mag(predicted_mag, H_mag)
         K_mag = P @ H_mag.T @ np.linalg.inv(H_mag @ P @ H_mag.T + R_mag)
         residual_mag = np.array([mag_x, mag_y, mag_z]) - predicted_mag
-        error_state = error_state + K_mag @ residual_mag
-        P = (I - K_mag @ H_mag) @ P
+        apply_correction(K_mag @ residual_mag)
+        P = (I - K_mag @ H_mag) @ P @ (I - K_mag @ H_mag).T + K_mag @ R_mag @ K_mag.T
 
-        d_theta = error_state[0:3]
-        gyro_bias = gyro_bias + error_state[3:6]
-        accel_bias = accel_bias + error_state[6:9]
-
-        dq = np.array([1.0, d_theta[0]/2, d_theta[1]/2, d_theta[2]/2])
-        q = quat_mult(q, dq)
-        q = q / np.linalg.norm(q)
-
-    return q, gyro_bias, accel_bias
+    return q, gyro_bias, accel_bias, P
 
 
 if __name__ == "__main__":
@@ -238,7 +258,7 @@ if __name__ == "__main__":
     print(f"true accel_bias:         {[round(b,3) for b in true_accel_bias]}\n")
 
     for label, wiggle_enabled in [("Dwell only (no wiggle)", False), ("Dwell + wiggle", True)]:
-        q, gyro_bias, accel_bias = run_calibration(wiggle_enabled)
+        q, gyro_bias, accel_bias, _P = run_calibration(wiggle_enabled)
         print(f"{label}:")
         print(f"  gyro_bias est (deg/s):  {[round(math.degrees(b),3) for b in gyro_bias]}")
         print(f"  accel_bias est:         {[round(b,3) for b in accel_bias]}")

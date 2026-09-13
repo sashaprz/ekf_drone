@@ -83,13 +83,14 @@ velocity = np.array([0.0, 0.0, 0.0]) # Initialize velocity
 position = np.array([0.0, 0.0, 0.0])
 
 #filter matrices
-P = np.eye(15) #how uncertain you currently are about each state, and how uncertainties are correlated
+P = np.eye(15) #placeholder - overwritten below, after calibration, from calibration's own converged P
 Q = np.diag([0.01, 0.01, 0.01, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6]) #how much new uncertainty is added by the prediction step (how uncertain you are abt gyro)
 R_accel_base = np.diag([ACCEL_NOISE_STD**2] * 3) #matches ACCEL_NOISE_STD above - the old 0.1 placeholder didn't match either sensor's real noise scale
 R_mag = np.diag([MAG_NOISE_STD**2] * 3) #matches MAG_NOISE_STD above - 0.1 was ~30%+ relative noise on a unit vector, wildly unrealistic
 F = np.eye(15) #state transition matrix, how the state evolves from one step to the next without control input (identity for this case)
 I = np.eye(15) #identity matrix for updating the covariance
-H_accel_mag = np.zeros((6, 15)) #measurement matrix, how the measurements relate to the state
+H_accel = np.zeros((3, 15)) #measurement matrix for accel - separate from H_mag now, since each correction re-linearizes independently (see apply_correction)
+H_mag = np.zeros((3, 15)) #measurement matrix for mag
 H_gps = np.zeros((6, 15)) #measurement matrix for GPS, how the measurements relate to the state (position rows 0:3, velocity rows 3:6)
 #how much uncertainty is added by the GPS measurement step. Grounded in typical consumer-GPS specs
 #rather than an arbitrary placeholder: ~2.5m 1-sigma horizontal, ~5m 1-sigma vertical (altitude is
@@ -229,15 +230,34 @@ def _cal_get_mag():
     v = v / np.linalg.norm(v)
     return tuple(v)
 
-#pre-flight calibration - seeds q/gyro_bias/accel_bias instead of starting from
-#identity/zero (see calibration.py: accel_bias and attitude tilt are otherwise
-#unobservable from a single fixed orientation, which is exactly what the accel_bias
-#column in update_H_mag_accel below needs at least a decent starting point for).
-q, (bias_x, bias_y, bias_z), (accel_bias_x, accel_bias_y, accel_bias_z) = \
+#pre-flight calibration - seeds q/gyro_bias/accel_bias/P instead of starting from
+#identity/zero/np.eye(15) (see calibration.py: accel_bias and attitude tilt are
+#otherwise unobservable from a single fixed orientation, which is exactly what the
+#accel_bias column in update_H_mag_accel below needs at least a decent starting point
+#for). Seeding P from calibration's own converged uncertainty - not a blind np.eye(15)
+#guess - matters specifically because np.eye(15) gave the pooled accel+mag correction
+#below a ~30% chance of overcorrecting badly enough to lock the accel gate on
+#permanently (see testing/test_gate_monte_carlo.py).
+q, (bias_x, bias_y, bias_z), (accel_bias_x, accel_bias_y, accel_bias_z), _P_cal = \
     calibration.calibrate(_cal_get_gyro, _cal_get_accel, _cal_get_mag,
                            dwell_steps=_CAL_DWELL_STEPS, wiggle_steps=400, dt=_CAL_DT,
                            gravity=GRAVITY, accel_noise_var=ACCEL_NOISE_STD**2, mag_noise_var=MAG_NOISE_STD**2)
 #main loop below uses get_gyro/get_accel/get_mag (the constant "in-flight" stubs), not the _cal_* functions
+
+#map calibration's 9x9 P (attitude, gyro_bias, accel_bias, in that order) onto this
+#file's 15x15 layout (attitude, gyro_bias, velocity, position, accel_bias) - velocity/
+#position get a modest independent prior since calibration never modeled them (the
+#vehicle was assumed stationary throughout)
+P = np.eye(15) * 0.1
+P[0:3, 0:3] = _P_cal[0:3, 0:3]      #attitude-attitude
+P[0:3, 3:6] = _P_cal[0:3, 3:6]      #attitude-gyro_bias
+P[3:6, 0:3] = _P_cal[3:6, 0:3]
+P[3:6, 3:6] = _P_cal[3:6, 3:6]      #gyro_bias-gyro_bias
+P[0:3, 12:15] = _P_cal[0:3, 6:9]    #attitude-accel_bias
+P[12:15, 0:3] = _P_cal[6:9, 0:3]
+P[3:6, 12:15] = _P_cal[3:6, 6:9]    #gyro_bias-accel_bias
+P[12:15, 3:6] = _P_cal[6:9, 3:6]
+P[12:15, 12:15] = _P_cal[6:9, 6:9]  #accel_bias-accel_bias
 
 #timing starts here, AFTER calibration - see the comment above where these used to live
 last_time = time.time()
@@ -258,15 +278,45 @@ def update_F(w, dt, F, q, accel_body):
     F[6:9, 12:15] = -dt * quat_to_R(q)
     return F
 
-def update_H_mag_accel(predicted_accel, predicted_mag, H):
-    #accel rows: jacobian of predicted_accel wrt state
+def update_H_accel(predicted_accel, H):
     H[0:3, 0:3] = skew(predicted_accel)
     H[0:3, 3:6] = 0
     H[0:3, 12:15] = np.eye(3)   # accel rows' Jacobian wrt accel_bias error
-    H[3:6, 0:3] = skew(predicted_mag)
-    H[3:6, 3:6] = 0
-    H[3:6, 12:15] = 0            # explicit, for symmetry — mag doesn't see accel bias
     return H
+
+def update_H_mag(predicted_mag, H):
+    H[0:3, 0:3] = skew(predicted_mag)
+    H[0:3, 3:6] = 0
+    H[0:3, 12:15] = 0            # explicit - mag doesn't see accel bias
+    return H
+
+def apply_correction(correction):
+    #injects one measurement's correction immediately and re-normalizes q, instead of
+    #pooling GPS+accel+mag against one frozen q and injecting once at the end. Pooling
+    #let two large-gain corrections (accel+mag) double-count against the same stale
+    #linearization when P was large, occasionally overcorrecting badly enough to lock
+    #the accel gate on permanently (see testing/test_gate_monte_carlo.py's ~30% lockout
+    #rate with np.eye(15) P0) - re-linearizing between each correction removes that
+    #mechanism outright, rather than just avoiding its trigger via a better-tuned P0.
+    global q, bias_x, bias_y, bias_z, velocity, position, accel_bias_x, accel_bias_y, accel_bias_z
+    d_theta = correction[0:3]
+    d_bias = correction[3:6]
+    d_velocity = correction[6:9]
+    d_position = correction[9:12]
+    d_accel_bias = correction[12:15]
+
+    bias_x = bias_x + d_bias[0]
+    bias_y = bias_y + d_bias[1]
+    bias_z = bias_z + d_bias[2]
+    accel_bias_x += d_accel_bias[0]
+    accel_bias_y += d_accel_bias[1]
+    accel_bias_z += d_accel_bias[2]
+    velocity += d_velocity
+    position += d_position
+
+    dq = np.array([1.0, d_theta[0]/2, d_theta[1]/2, d_theta[2]/2])
+    q = quat_mult(q, dq)
+    q = q / np.linalg.norm(q)
 
 def update_H_gps(H):
     #gps measures position AND velocity directly (linear model, no skew()/Jacobian needed) -
@@ -300,9 +350,7 @@ while True:
     now = time.time()
     dt = now - last_time #sampling as fast as the hardware can handle
 
-    error_state = np.zeros(15)  # Initialize error state vector
-
-    #using gyro to advance the attitude estimation forward by one timestep. 
+    #using gyro to advance the attitude estimation forward by one timestep.
     #multiplying 2 unit quaternions
     w_quat = [0, corrected_gyro_x, corrected_gyro_y, corrected_gyro_z] #building a quaternarion with scalar value 0
     q_dot = 0.5 * quat_mult(q, w_quat) #q dot is how fast the quaternarion is moving, but we need to convert it into quaternarion space so we can integrate it in the next step
@@ -321,12 +369,16 @@ while True:
     F = update_F(w, dt, F, q, corrected_accel) #describes how error state vector evolves. 
     P = F @ P @ F.T + Q #update covariance error matrix, uncertainty increases because we are just integrating the model
 
+    #Each correction below is applied immediately (apply_correction) and re-linearizes
+    #the next one against the just-updated q, rather than pooling all three against one
+    #frozen q and injecting once at the end - see apply_correction's comment for why.
+
     #gated bc gps sample rate is lower than accel/mag/gyro
     if now - last_gps_time >= gps_period:
         #get gps data
         north, east, up, vel_north, vel_east, vel_up = get_gps()
         gps_measurement = np.array([north, east, up, vel_north, vel_east, vel_up]) #current GPS position + velocity, compared against predicted position/velocity in the gps correction step
-        
+
         #gps correction
         H_gps = update_H_gps(H_gps) #builds measurment jacobian for this update
         S_gps = H_gps @ P @ H_gps.T + R_gps #how much uncertainty you'd expect in residual, combining current uncertainty with sensor noise R_gps
@@ -337,9 +389,9 @@ while True:
         #adaptively inflated like R_accel, so no separate "base" R is needed here
         d_squared_gps = residual_gps.T @ np.linalg.inv(S_gps) @ residual_gps
 
-        #to catch unreasonable measurements and not let them corrupt the state. 
+        #to catch unreasonable measurements and not let them corrupt the state.
         if d_squared_gps <= chi2_threshold_gps:
-            error_state = error_state + K_gps @ residual_gps #apply the correction.
+            apply_correction(K_gps @ residual_gps)
             #Joseph form - numerically robust to floating-point drift (keeps P symmetric/PSD),
             #vs the algebraically-equivalent but fragile (I-KH)@P
             P = (I - K_gps @ H_gps) @ P @ (I - K_gps @ H_gps).T + K_gps @ R_gps @ K_gps.T
@@ -347,14 +399,11 @@ while True:
         #else: skip entirely - state and P stay exactly as the predict step left them
         last_gps_time = now
 
-    #predicted accel/mag + error_state init
-    #compute the expected measuremnets so you can compare them with what you actually got. 
+    #accel correction - predicted_accel uses q as GPS may have just updated it (via P's
+    #attitude-position cross-covariance, even though H_gps itself has no attitude columns)
     predicted_accel = rotate_by_quat(quat_conjugate(q), np.array([0.0, 0.0, GRAVITY]))
-    predicted_mag = rotate_by_quat(quat_conjugate(q), np.array([1.0, 0.0, 0.0]))
-    H_accel_mag = update_H_mag_accel(predicted_accel, predicted_mag, H_accel_mag)
-    H_accel = H_accel_mag[0:3, :]
+    H_accel = update_H_accel(predicted_accel, H_accel)
 
-    #accel correction
     S_accel = H_accel @ P @ H_accel.T + R_accel
     K_accel = P @ H_accel.T @ np.linalg.inv(S_accel)
     residual_accel = np.array([corrected_accel_x, corrected_accel_y, corrected_accel_z]) - predicted_accel
@@ -365,13 +414,17 @@ while True:
     d_squared = residual_accel.T @ np.linalg.inv(S_accel_gate) @ residual_accel
 
     if d_squared <= chi2_threshold:
-      error_state = error_state + K_accel @ residual_accel
+      apply_correction(K_accel @ residual_accel)
       #this is the second p update, after we incorporate a measuremnt uncertainty goes down bc that is another measurement source
       P = (I - K_accel @ H_accel) @ P @ (I - K_accel @ H_accel).T + K_accel @ R_accel @ K_accel.T
     #else: skip entirely - state and P stay exactly as the predict step left them
 
-    #mag correction
-    H_mag = H_accel_mag[3:]
+    #mag correction - predicted_mag uses q as it stands AFTER the accel correction just
+    #applied, not the stale pre-accel q - this is what actually removes the overcorrection
+    #risk, not just avoiding a bad P0 (see apply_correction's comment)
+    predicted_mag = rotate_by_quat(quat_conjugate(q), np.array([1.0, 0.0, 0.0]))
+    H_mag = update_H_mag(predicted_mag, H_mag)
+
     S_mag = H_mag @ P @ H_mag.T + R_mag
     K_mag = P @ H_mag.T @ np.linalg.inv(S_mag)
     residual_mag = np.array([mag_x, mag_y, mag_z]) - predicted_mag
@@ -380,32 +433,10 @@ while True:
     d_squared_mag = residual_mag.T @ np.linalg.inv(S_mag) @ residual_mag
 
     if d_squared_mag <= chi2_threshold:
-        error_state = error_state + K_mag @ residual_mag
+        apply_correction(K_mag @ residual_mag)
         #this is the second p update, after we incorporate a measuremnt uncertainty goes down bc that is another measurement source
         P = (I - K_mag @ H_mag) @ P @ (I - K_mag @ H_mag).T + K_mag @ R_mag @ K_mag.T
     #else: skip entirely - state and P stay exactly as the predict step left them
-
-    #d meaning delta, small change
-    #its a correction to the state
-    d_theta = error_state[0:3]
-    d_bias  = error_state[3:6]
-    d_velocity = error_state[6:9]
-    d_position = error_state[9:12]
-    d_accel_bias = error_state[12:15]
-
-    bias_x = bias_x + d_bias[0]
-    bias_y = bias_y + d_bias[1]
-    bias_z = bias_z + d_bias[2]
-    accel_bias_x += d_accel_bias[0]
-    accel_bias_y += d_accel_bias[1]
-    accel_bias_z += d_accel_bias[2]
-    velocity += d_velocity
-    position += d_position
-
-    #the multiplicative (MEKF) bit, composing the corrections by multiplying them 
-    dq = np.array([1.0, d_theta[0]/2, d_theta[1]/2, d_theta[2]/2])
-    q = quat_mult(q, dq)
-    q = q / np.linalg.norm(q)
 
     print("q: ", q, "velocity: ", velocity, "position: ", position, "bias: ", [bias_x, bias_y, bias_z])
 
