@@ -56,6 +56,10 @@ TRUE_AMP_YAW = math.radians(5); TRUE_FREQ_YAW = 0.1; TRUE_PHASE_YAW = math.pi
 #when those agree.
 TRUE_GYRO_BIAS = np.array([math.radians(2), math.radians(-1), math.radians(0.5)])
 TRUE_ACCEL_BIAS = np.array([0.05, -0.02, 0.03])
+TRUE_MAG_BIAS = np.array([0.04, 0.06, -0.03])   #hard-iron style sensor offset - see
+                                                 #calibration.py's docstring caveat: this
+                                                 #treats it as constant, real interference
+                                                 #may be current/throttle-dependent instead
 GYRO_NOISE_STD = math.radians(0.5)
 ACCEL_NOISE_STD = 0.02
 MAG_NOISE_STD = 0.01
@@ -79,19 +83,23 @@ bias_z = 0
 accel_bias_x = 0
 accel_bias_y = 0
 accel_bias_z = 0
+mag_bias_x = 0
+mag_bias_y = 0
+mag_bias_z = 0
 velocity = np.array([0.0, 0.0, 0.0]) # Initialize velocity
 position = np.array([0.0, 0.0, 0.0])
 
-#filter matrices
-P = np.eye(15) #placeholder - overwritten below, after calibration, from calibration's own converged P
-Q = np.diag([0.01, 0.01, 0.01, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6]) #how much new uncertainty is added by the prediction step (how uncertain you are abt gyro)
+#filter matrices - 18 states: attitude(0:3), gyro_bias(3:6), velocity(6:9),
+#position(9:12), accel_bias(12:15), mag_bias(15:18)
+P = np.eye(18) #placeholder - overwritten below, after calibration, from calibration's own converged P
+Q = np.diag([0.01, 0.01, 0.01, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6]) #how much new uncertainty is added by the prediction step (how uncertain you are abt gyro)
 R_accel_base = np.diag([ACCEL_NOISE_STD**2] * 3) #matches ACCEL_NOISE_STD above - the old 0.1 placeholder didn't match either sensor's real noise scale
 R_mag = np.diag([MAG_NOISE_STD**2] * 3) #matches MAG_NOISE_STD above - 0.1 was ~30%+ relative noise on a unit vector, wildly unrealistic
-F = np.eye(15) #state transition matrix, how the state evolves from one step to the next without control input (identity for this case)
-I = np.eye(15) #identity matrix for updating the covariance
-H_accel = np.zeros((3, 15)) #measurement matrix for accel - separate from H_mag now, since each correction re-linearizes independently (see apply_correction)
-H_mag = np.zeros((3, 15)) #measurement matrix for mag
-H_gps = np.zeros((6, 15)) #measurement matrix for GPS, how the measurements relate to the state (position rows 0:3, velocity rows 3:6)
+F = np.eye(18) #state transition matrix, how the state evolves from one step to the next without control input (identity for this case)
+I = np.eye(18) #identity matrix for updating the covariance
+H_accel = np.zeros((3, 18)) #measurement matrix for accel - separate from H_mag now, since each correction re-linearizes independently (see apply_correction)
+H_mag = np.zeros((3, 18)) #measurement matrix for mag
+H_gps = np.zeros((6, 18)) #measurement matrix for GPS, how the measurements relate to the state (position rows 0:3, velocity rows 3:6)
 #how much uncertainty is added by the GPS measurement step. Grounded in typical consumer-GPS specs
 #rather than an arbitrary placeholder: ~2.5m 1-sigma horizontal, ~5m 1-sigma vertical (altitude is
 #usually ~2x worse than horizontal from a single constellation), ~0.15 m/s 1-sigma horizontal velocity,
@@ -165,7 +173,9 @@ def get_mag():
     my = math.sin(roll) * math.sin(pitch) * math.cos(yaw) - math.cos(roll) * math.sin(yaw)
     mz = math.cos(roll) * math.sin(pitch) * math.cos(yaw) + math.sin(roll) * math.sin(yaw)
     noise = np.random.normal(0, MAG_NOISE_STD, 3)
-    return (mx + noise[0], my + noise[1], mz + noise[2])
+    return (mx + TRUE_MAG_BIAS[0] + noise[0],
+            my + TRUE_MAG_BIAS[1] + noise[1],
+            mz + TRUE_MAG_BIAS[2] + noise[2])
 
 def get_gps():
     #hovering translationally (true position/velocity are always zero) - this file's
@@ -177,10 +187,13 @@ def get_gps():
 
 #---- pre-flight calibration wiggle: a separate set of sensor functions (_cal_get_*),
 #used only for the calibration.calibrate() call below, so it sees a genuinely changing
-#attitude (dwell, then a small deliberate roll/pitch wiggle) instead of the constant
-#"in-flight" stubs the main loop uses - without this, accel_bias and attitude tilt are
-#indistinguishable from one orientation (see calibration.py) and the calibration call
-#would just be going through the motions with nothing to disambiguate them ----
+#attitude (dwell, then a small deliberate roll/pitch/yaw wiggle) instead of the constant
+#"in-flight" stubs the main loop uses - without this, accel_bias/mag_bias and
+#attitude/heading tilt are indistinguishable from one orientation (see calibration.py)
+#and the calibration call would just be going through the motions with nothing to
+#disambiguate them. Yaw wiggle specifically is what mag_bias needs (same role
+#roll/pitch play for accel_bias) - without it mag_bias vs. heading error is exactly as
+#ambiguous as accel_bias vs. tilt was before the roll/pitch wiggle existed ----
 _calibration_step = 0
 _CAL_DWELL_STEPS = 200
 _CAL_DT = 0.01
@@ -188,30 +201,38 @@ _CAL_WIGGLE_AMP_ROLL = math.radians(8)
 _CAL_WIGGLE_FREQ_ROLL = 0.8
 _CAL_WIGGLE_AMP_PITCH = math.radians(6)
 _CAL_WIGGLE_FREQ_PITCH = 0.5
+_CAL_WIGGLE_AMP_YAW = math.radians(10)
+_CAL_WIGGLE_FREQ_YAW = 0.4
 
 def _cal_attitude(step):
     if step < _CAL_DWELL_STEPS:
-        return 0.0, 0.0
+        return 0.0, 0.0, 0.0
     t = (step - _CAL_DWELL_STEPS) * _CAL_DT
     roll = _CAL_WIGGLE_AMP_ROLL * math.sin(_CAL_WIGGLE_FREQ_ROLL * t)
     pitch = _CAL_WIGGLE_AMP_PITCH * math.sin(_CAL_WIGGLE_FREQ_PITCH * t)
-    return roll, pitch
+    yaw = _CAL_WIGGLE_AMP_YAW * math.sin(_CAL_WIGGLE_FREQ_YAW * t)
+    return roll, pitch, yaw
 
 def _cal_rates(step):
     if step < _CAL_DWELL_STEPS:
-        return 0.0, 0.0
+        return 0.0, 0.0, 0.0
     t = (step - _CAL_DWELL_STEPS) * _CAL_DT
     roll_dot = _CAL_WIGGLE_AMP_ROLL * _CAL_WIGGLE_FREQ_ROLL * math.cos(_CAL_WIGGLE_FREQ_ROLL * t)
     pitch_dot = _CAL_WIGGLE_AMP_PITCH * _CAL_WIGGLE_FREQ_PITCH * math.cos(_CAL_WIGGLE_FREQ_PITCH * t)
-    return roll_dot, pitch_dot
+    yaw_dot = _CAL_WIGGLE_AMP_YAW * _CAL_WIGGLE_FREQ_YAW * math.cos(_CAL_WIGGLE_FREQ_YAW * t)
+    return roll_dot, pitch_dot, yaw_dot
 
 def _cal_get_gyro():
-    roll_dot, pitch_dot = _cal_rates(_calibration_step)
-    return roll_dot, pitch_dot, 0.0
+    roll, pitch, _ = _cal_attitude(_calibration_step)
+    roll_dot, pitch_dot, yaw_dot = _cal_rates(_calibration_step)
+    wx = roll_dot - yaw_dot * math.sin(pitch)
+    wy = pitch_dot * math.cos(roll) + yaw_dot * math.sin(roll) * math.cos(pitch)
+    wz = -pitch_dot * math.sin(roll) + yaw_dot * math.cos(roll) * math.cos(pitch)
+    return wx, wy, wz
 
 def _cal_get_accel():
     global _calibration_step
-    roll, pitch = _cal_attitude(_calibration_step)
+    roll, pitch, _ = _cal_attitude(_calibration_step)
     ax = -GRAVITY * math.sin(pitch)
     ay = GRAVITY * math.sin(roll) * math.cos(pitch)
     az = GRAVITY * math.cos(roll) * math.cos(pitch)
@@ -222,33 +243,36 @@ def _cal_get_accel():
     return ax, ay, az
 
 def _cal_get_mag():
-    roll, pitch = _cal_attitude(_calibration_step)
-    mx = math.cos(pitch)
-    my = math.sin(roll) * math.sin(pitch)
-    mz = math.cos(roll) * math.sin(pitch)
+    roll, pitch, yaw = _cal_attitude(_calibration_step)
+    mx = math.cos(pitch) * math.cos(yaw)
+    my = math.sin(roll) * math.sin(pitch) * math.cos(yaw) - math.cos(roll) * math.sin(yaw)
+    mz = math.cos(roll) * math.sin(pitch) * math.cos(yaw) + math.sin(roll) * math.sin(yaw)
     v = np.array([mx, my, mz])
     v = v / np.linalg.norm(v)
     return tuple(v)
 
-#pre-flight calibration - seeds q/gyro_bias/accel_bias/P instead of starting from
-#identity/zero/np.eye(15) (see calibration.py: accel_bias and attitude tilt are
-#otherwise unobservable from a single fixed orientation, which is exactly what the
-#accel_bias column in update_H_mag_accel below needs at least a decent starting point
-#for). Seeding P from calibration's own converged uncertainty - not a blind np.eye(15)
-#guess - matters specifically because np.eye(15) gave the pooled accel+mag correction
-#below a ~30% chance of overcorrecting badly enough to lock the accel gate on
-#permanently (see testing/test_gate_monte_carlo.py).
-q, (bias_x, bias_y, bias_z), (accel_bias_x, accel_bias_y, accel_bias_z), _P_cal = \
+#pre-flight calibration - seeds q/gyro_bias/accel_bias/mag_bias/P instead of starting
+#from identity/zero/np.eye(18) (see calibration.py: accel_bias/mag_bias and
+#attitude/heading tilt are otherwise unobservable from a single fixed orientation,
+#which is exactly what the accel_bias/mag_bias columns in update_H_accel/update_H_mag
+#below need at least a decent starting point for). Seeding P from calibration's own
+#converged uncertainty - not a blind np.eye(18) guess - matters specifically because
+#np.eye(15) (this file's old 15-state size) gave the pooled accel+mag correction below
+#a ~30% chance of overcorrecting badly enough to lock the accel gate on permanently
+#(see testing/test_gate_monte_carlo.py; the sequential apply_correction design below
+#also independently closes this, but a good P0 remains cheap insurance).
+q, (bias_x, bias_y, bias_z), (accel_bias_x, accel_bias_y, accel_bias_z), \
+    (mag_bias_x, mag_bias_y, mag_bias_z), _P_cal = \
     calibration.calibrate(_cal_get_gyro, _cal_get_accel, _cal_get_mag,
                            dwell_steps=_CAL_DWELL_STEPS, wiggle_steps=400, dt=_CAL_DT,
                            gravity=GRAVITY, accel_noise_var=ACCEL_NOISE_STD**2, mag_noise_var=MAG_NOISE_STD**2)
 #main loop below uses get_gyro/get_accel/get_mag (the constant "in-flight" stubs), not the _cal_* functions
 
-#map calibration's 9x9 P (attitude, gyro_bias, accel_bias, in that order) onto this
-#file's 15x15 layout (attitude, gyro_bias, velocity, position, accel_bias) - velocity/
-#position get a modest independent prior since calibration never modeled them (the
-#vehicle was assumed stationary throughout)
-P = np.eye(15) * 0.1
+#map calibration's 12x12 P (attitude, gyro_bias, accel_bias, mag_bias, in that order)
+#onto this file's 18x18 layout (attitude, gyro_bias, velocity, position, accel_bias,
+#mag_bias) - velocity/position get a modest independent prior since calibration never
+#modeled them (the vehicle was assumed stationary throughout)
+P = np.eye(18) * 0.1
 P[0:3, 0:3] = _P_cal[0:3, 0:3]      #attitude-attitude
 P[0:3, 3:6] = _P_cal[0:3, 3:6]      #attitude-gyro_bias
 P[3:6, 0:3] = _P_cal[3:6, 0:3]
@@ -258,6 +282,13 @@ P[12:15, 0:3] = _P_cal[6:9, 0:3]
 P[3:6, 12:15] = _P_cal[3:6, 6:9]    #gyro_bias-accel_bias
 P[12:15, 3:6] = _P_cal[6:9, 3:6]
 P[12:15, 12:15] = _P_cal[6:9, 6:9]  #accel_bias-accel_bias
+P[0:3, 15:18] = _P_cal[0:3, 9:12]   #attitude-mag_bias
+P[15:18, 0:3] = _P_cal[9:12, 0:3]
+P[3:6, 15:18] = _P_cal[3:6, 9:12]   #gyro_bias-mag_bias
+P[15:18, 3:6] = _P_cal[9:12, 3:6]
+P[12:15, 15:18] = _P_cal[6:9, 9:12] #accel_bias-mag_bias
+P[15:18, 12:15] = _P_cal[9:12, 6:9]
+P[15:18, 15:18] = _P_cal[9:12, 9:12] #mag_bias-mag_bias
 
 #timing starts here, AFTER calibration - see the comment above where these used to live
 last_time = time.time()
@@ -276,18 +307,23 @@ def update_F(w, dt, F, q, accel_body):
     F[9:12, 6:9] = dt * np.eye(3)
     F[12:15, 12:15] = np.eye(3)
     F[6:9, 12:15] = -dt * quat_to_R(q)
+    F[15:18, 15:18] = np.eye(3)   # mag_bias persists - no coupling into velocity/position
+                                   # the way accel_bias has (mag doesn't drive propagation)
     return F
 
 def update_H_accel(predicted_accel, H):
     H[0:3, 0:3] = skew(predicted_accel)
     H[0:3, 3:6] = 0
     H[0:3, 12:15] = np.eye(3)   # accel rows' Jacobian wrt accel_bias error
+    H[0:3, 15:18] = 0            # explicit - accel doesn't see mag bias
     return H
 
 def update_H_mag(predicted_mag, H):
     H[0:3, 0:3] = skew(predicted_mag)
     H[0:3, 3:6] = 0
     H[0:3, 12:15] = 0            # explicit - mag doesn't see accel bias
+    H[0:3, 15:18] = np.eye(3)    # mag rows' Jacobian wrt mag_bias error - same
+                                  # derivation as accel_bias's +I (see calibration.py)
     return H
 
 def apply_correction(correction):
@@ -298,12 +334,13 @@ def apply_correction(correction):
     #the accel gate on permanently (see testing/test_gate_monte_carlo.py's ~30% lockout
     #rate with np.eye(15) P0) - re-linearizing between each correction removes that
     #mechanism outright, rather than just avoiding its trigger via a better-tuned P0.
-    global q, bias_x, bias_y, bias_z, velocity, position, accel_bias_x, accel_bias_y, accel_bias_z
+    global q, bias_x, bias_y, bias_z, velocity, position, accel_bias_x, accel_bias_y, accel_bias_z, mag_bias_x, mag_bias_y, mag_bias_z
     d_theta = correction[0:3]
     d_bias = correction[3:6]
     d_velocity = correction[6:9]
     d_position = correction[9:12]
     d_accel_bias = correction[12:15]
+    d_mag_bias = correction[15:18]
 
     bias_x = bias_x + d_bias[0]
     bias_y = bias_y + d_bias[1]
@@ -311,6 +348,9 @@ def apply_correction(correction):
     accel_bias_x += d_accel_bias[0]
     accel_bias_y += d_accel_bias[1]
     accel_bias_z += d_accel_bias[2]
+    mag_bias_x += d_mag_bias[0]
+    mag_bias_y += d_mag_bias[1]
+    mag_bias_z += d_mag_bias[2]
     velocity += d_velocity
     position += d_position
 
@@ -345,6 +385,10 @@ while True:
     corrected_accel_x = accel_x - accel_bias_x
     corrected_accel_y = accel_y - accel_bias_y
     corrected_accel_z = accel_z - accel_bias_z
+
+    corrected_mag_x = mag_x - mag_bias_x
+    corrected_mag_y = mag_y - mag_bias_y
+    corrected_mag_z = mag_z - mag_bias_z
 
     #predict: integrate gyro into current angle estimation
     now = time.time()
@@ -427,7 +471,7 @@ while True:
 
     S_mag = H_mag @ P @ H_mag.T + R_mag
     K_mag = P @ H_mag.T @ np.linalg.inv(S_mag)
-    residual_mag = np.array([mag_x, mag_y, mag_z]) - predicted_mag
+    residual_mag = np.array([corrected_mag_x, corrected_mag_y, corrected_mag_z]) - predicted_mag
     #gate against magnetic interference (motors/ESCs) - R_mag is static, not
     #adaptively inflated like R_accel, so no separate "base" R is needed here
     d_squared_mag = residual_mag.T @ np.linalg.inv(S_mag) @ residual_mag
@@ -438,7 +482,7 @@ while True:
         P = (I - K_mag @ H_mag) @ P @ (I - K_mag @ H_mag).T + K_mag @ R_mag @ K_mag.T
     #else: skip entirely - state and P stay exactly as the predict step left them
 
-    print("q: ", q, "velocity: ", velocity, "position: ", position, "bias: ", [bias_x, bias_y, bias_z])
+    print("q: ", q, "velocity: ", velocity, "position: ", position, "bias: ", [bias_x, bias_y, bias_z], "mag_bias: ", [mag_bias_x, mag_bias_y, mag_bias_z])
 
     #loop timing
     last_time = now

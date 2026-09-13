@@ -88,3 +88,11 @@ With gates on, both outliers are caught and the state never moves. Without them,
 ## Pooled vs. sequential corrections (`gps.py`, `calibration.py`, `test_gate_monte_carlo.py`)
 
 GPS, accel, and mag corrections used to be pooled against one stale attitude estimate per tick and injected together, which is only safe for a linear filter; now each one is applied immediately and the next re-linearizes against the result. That alone cut a real ~30% chance of permanently locking the accel gate on at startup down to 0/20 in Monte Carlo testing (`test_gate_monte_carlo.py`), independent of how well `P0` happens to be tuned.
+
+## Magnetometer bias (`gps.py`, `calibration.py`, `test_accel_bias_convergence.py`)
+
+Added `mag_bias` as a full state (mirrors `accel_bias`: same tilt/bias ambiguity, same fix - a yaw wiggle added to the pre-flight calibration breaks mag_bias from heading error the way the roll/pitch wiggle already broke accel_bias from tilt). Converges to within ~0.0004 of the true injected bias under a rotating trajectory.
+
+## Robustness scenarios (`test_robustness_scenarios.py`)
+
+Three untested-but-plausible failure modes, checked directly: a sustained (not single-spike) magnetometer interference burst is rejected 500/500 by the gate, but heading still drifts ~26° during a 5s outage and recovers slowly afterward - yaw has no backup reference once mag is unavailable. A 30s GPS dropout degrades boundedly (~0.7m to ~1.7m) and recovers cleanly once GPS returns. A sudden mid-flight accel_bias step is tracked correctly but slowly (~40s to mostly converge), consistent with `gyro_bias`'s already-known slow settling rather than a new issue.
