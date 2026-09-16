@@ -54,6 +54,8 @@ class Cascade:
         # pos error -> velocity setpoint
         # assumes state is a dict with state["pos"] as a flat np.array([x, y, z]),
         # matching the EKF's position layout. pos_setpoint is the same shape.
+        #pulls the current xyz position estimation from the EKF state vector, feeds each axis into its own PID against setpoint
+        #then feed velocity the outputs in an array
         vx = self.pos_pid_x.update(pos_setpoint[0], state["pos"][0], dt)
         vy = self.pos_pid_y.update(pos_setpoint[1], state["pos"][1], dt)
         vz = self.pos_pid_z.update(pos_setpoint[2], state["pos"][2], dt)
@@ -62,6 +64,11 @@ class Cascade:
     def velocity_loop(self, vel_setpoint, state, dt):
         # vel error -> desired accel -> (roll_sp, pitch_sp, thrust)
         # remember: rotate accel by -yaw before mapping to pitch/roll
+        ax = self.pos_vel_pid_x.update(vel_setpoint[0], state["vel"][0], dt)
+        ay = self.pos_vel_pid_y.update(vel_setpoint[1], state["vel"][1], dt)
+        az = self.pos_vel_pid_z.update(vel_setpoint[2], state["vel"][2], dt)
+
+        
 
     def attitude_loop(self, att_setpoint, state, dt):
         # attitude error (quaternion-aware) -> rate setpoint
