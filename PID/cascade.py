@@ -1,5 +1,7 @@
 import numpy as np
 
+from pid import PID
+
 # gains + limits live here as plain constants/dict for now
 # each GAINS entry is {"kp": ..., "ki": ..., "kd": ...} so it can be unpacked straight into PID(**GAINS["pos_xy"], ...)
 GAINS = {
