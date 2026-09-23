@@ -303,6 +303,8 @@ class DroneEKF:
         #a ~30% chance of overcorrecting badly enough to lock the accel gate on permanently
         #(see testing/test_gate_monte_carlo.py; the sequential apply_correction design below
         #also independently closes this, but a good P0 remains cheap insurance).
+        global _calibration_step
+        _calibration_step = 0  # reset so a later DroneEKF() doesn't inherit an earlier one's leftover count
         self.q, (self.bias_x, self.bias_y, self.bias_z), (self.accel_bias_x, self.accel_bias_y, self.accel_bias_z), \
             (self.mag_bias_x, self.mag_bias_y, self.mag_bias_z), _P_cal = \
             calibration.calibrate(_cal_get_gyro, _cal_get_accel, _cal_get_mag,
@@ -486,12 +488,9 @@ class DroneEKF:
             self.P = (I - K_mag @ self.H_mag) @ self.P @ (I - K_mag @ self.H_mag).T + K_mag @ R_mag @ K_mag.T
         #else: skip entirely - state and P stay exactly as the predict step left them
 
-        print("q: ", self.q, "velocity: ", self.velocity, "position: ", self.position, "bias: ", [self.bias_x, self.bias_y, self.bias_z], "mag_bias: ", [self.mag_bias_x, self.mag_bias_y, self.mag_bias_z])
-
         #loop timing
         self.last_time = now
         sim_time += dt   #advances the ground truth by the same dt the filter just integrated with
-        time.sleep(0.01) #sleep for 10ms to simulate sensor reading rate
 
         return self.get_state()
 
