@@ -91,7 +91,10 @@ class Cascade:
         a_right = -ax * np.sin(yaw) + ay * np.cos(yaw)
 
         pitch_sp = np.arctan2(a_fwd, GRAVITY)
-        roll_sp = np.arctan2(-a_right, GRAVITY)
+        # +roll = right-side-down in Gazebo's FLU body frame (verified against mix()'s
+        # rotation-matrix derivation), which is what accelerates the vehicle rightward -
+        # so +a_right needs +roll_sp, not -roll_sp (this was backwards and caused runaway drift)
+        roll_sp = np.arctan2(a_right, GRAVITY)
         pitch_sp = np.clip(pitch_sp, -self.max_tilt_rad, self.max_tilt_rad)
         roll_sp = np.clip(roll_sp, -self.max_tilt_rad, self.max_tilt_rad)
 
@@ -180,9 +183,21 @@ def euler_to_quat(roll, pitch, yaw):
 
 
 def mix(thrust, roll_tau, pitch_tau, yaw_tau, motor_range, frame="quad_x"):
-    # returns per-motor commands, clamped to actuator range
-    m1 = thrust + roll_tau - pitch_tau - yaw_tau
-    m2 = thrust - roll_tau - pitch_tau + yaw_tau
-    m3 = thrust - roll_tau + pitch_tau - yaw_tau
-    m4 = thrust + roll_tau + pitch_tau + yaw_tau
+    # returns per-motor commands, clamped to actuator range.
+    # Real x500 rotor layout (Tools/simulation/gz/models/x500_base/model.sdf, in Gazebo's
+    # native FLU body frame - X forward, Y LEFT positive, Z up):
+    #   m1 = motor 0 = front-right, ccw   m2 = motor 1 = back-left,  ccw
+    #   m3 = motor 2 = front-left,  cw    m4 = motor 3 = back-right, cw
+    # Signs derived from the actual rotation-matrix physics, not just "seems right":
+    #   roll_tau:  + rotation about +X (FLU) tips body-up toward -Y (right) -> right-side-down,
+    #              so achieving +roll needs MORE lift on the left, LESS on the right: +left, -right
+    #   pitch_tau: + rotation about +Y (FLU) tips body-up toward +X (forward) -> nose-down,
+    #              so achieving +pitch needs MORE lift at the back, LESS at front: +back, -front
+    #   yaw_tau:   + rotation about +Z swings the nose toward +Y (left) -> CCW from above.
+    #              A ccw-spinning motor's reaction torque is CW (Newton's third law) = NEGATIVE yaw,
+    #              so achieving +yaw needs MORE cw-motor thrust, LESS ccw-motor thrust: +cw, -ccw
+    m1 = thrust - roll_tau - pitch_tau - yaw_tau
+    m2 = thrust + roll_tau + pitch_tau - yaw_tau
+    m3 = thrust + roll_tau - pitch_tau + yaw_tau
+    m4 = thrust - roll_tau + pitch_tau + yaw_tau
     return tuple(np.clip([m1, m2, m3, m4], motor_range[0], motor_range[1]))

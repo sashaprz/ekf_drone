@@ -267,7 +267,17 @@ def update_H_gps(H):
 
 
 class DroneEKF:
-    def __init__(self):
+    def __init__(self, sensors=None):
+        # sensors: object exposing get_gyro/get_accel/get_mag/get_gps (same shapes as
+        # this module's own simulated versions) - defaults to those simulated stand-ins,
+        # but step() can instead be driven by e.g. gz_bridge.GazeboBridge for real sim data.
+        # Calibration always uses its own synthetic _cal_get_* wiggle functions regardless
+        # (it needs a deliberate dwell+wiggle sequence, not whatever the live sensors report).
+        self._get_gyro = get_gyro if sensors is None else sensors.get_gyro
+        self._get_accel = get_accel if sensors is None else sensors.get_accel
+        self._get_mag = get_mag if sensors is None else sensors.get_mag
+        self._get_gps = get_gps if sensors is None else sensors.get_gps
+
         #state variables - placeholders, overwritten by the pre-flight calibration call below
         #(get_gyro/get_accel/get_mag have to be defined first, so the actual calibrate() call
         #happens further down, right after those are defined)
@@ -375,9 +385,9 @@ class DroneEKF:
         global sim_time
 
         #read the sensors
-        gyro_x, gyro_y, gyro_z = get_gyro()
-        mag_x, mag_y, mag_z = get_mag()
-        accel_x, accel_y, accel_z = get_accel()
+        gyro_x, gyro_y, gyro_z = self._get_gyro()
+        mag_x, mag_y, mag_z = self._get_mag()
+        accel_x, accel_y, accel_z = self._get_accel()
 
         #adaptive accel noise + bias-corrected gyro + accel
         accel_magnitude = math.sqrt(accel_x**2 + accel_y**2 + accel_z**2)
@@ -426,7 +436,7 @@ class DroneEKF:
         #gated bc gps sample rate is lower than accel/mag/gyro
         if now - self.last_gps_time >= gps_period:
             #get gps data
-            north, east, up, vel_north, vel_east, vel_up = get_gps()
+            north, east, up, vel_north, vel_east, vel_up = self._get_gps()
             gps_measurement = np.array([north, east, up, vel_north, vel_east, vel_up]) #current GPS position + velocity, compared against predicted position/velocity in the gps correction step
 
             #gps correction
