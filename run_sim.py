@@ -24,18 +24,13 @@ import cascade
 # time - expect it to sag noticeably before ki catches up, there's no gravity
 # feedforward term in cascade.py to shortcut that.
 GAINS = {
-    # pos_xy given real gains, 2026-09-26 - a real `run_sim.py` full-cascade attempt
-    # (first one since this session's rate/attitude/velocity fixes) climbed cleanly to
-    # ~1.8m, then pitch jumped from ~1 degree to -9.8 degrees around t=1.85-1.90s and
-    # grew smoothly from there into a full tumble by t~4s. Correlated against position:
-    # pos.x's growth rate roughly tripled (0.45->1.3 m/s) at the exact same moment. With
-    # pos_xy at zero, nothing pulls the vehicle back toward its target position - only
-    # vel_xy holds velocity near 0, so any small residual velocity is free to integrate
-    # into growing position drift indefinitely, and the x500's real velocity-scaling
-    # rotor-drag disturbance (documented earlier this session via the rate-loop tests)
-    # eventually overwhelms vel_xy's modest authority. This is exactly the next
-    # untuned rung on the inside-out ladder (position was always going to need real
-    # gains eventually) - starting guess, not yet independently verified in isolation.
+    # pos_xy TRIED at kp=1.0/kd=0.5 (2026-09-26) and REVERTED - made the full-cascade
+    # divergence happen even earlier (t~1.92s vs ~1.85-1.90s), not later. The theory
+    # that motivated trying it (unbounded position drift from nothing correcting
+    # position) is likely wrong, or at least incomplete - see HANDOFF.md's "full
+    # cascade divergence, root cause still open" note. Back to zero until the real
+    # cause is found - don't re-enable this blind based on the same reasoning that
+    # motivated the reverted attempt.
     #
     # vel_xy given real gains, 2026-09-26 (was zeroed as a diagnostic predating this
     # session, to isolate whether horizontal drift correction caused the old "aggressive
@@ -56,7 +51,7 @@ GAINS = {
     # feedback loop (oscillation), not a wrong-sign one (which saturates one-sided and
     # sits there). kp cut 2.0->0.8, kd raised 0.3->0.6 for more damping. NOT yet
     # confirmed stable - re-test before trusting these values.
-    "pos_xy": {"kp": 1.0, "ki": 0.0, "kd": 0.5},
+    "pos_xy": {"kp": 0.0, "ki": 0.0, "kd": 0.0},
     "pos_z":  {"kp": 1.5, "ki": 0.0, "kd": 0.3},
     "vel_xy": {"kp": 0.8, "ki": 0.2, "kd": 0.6, "integral_limits": (-5.0, 5.0)},
     # cut further (40/60 -> 15/20) - across three runs now, instability tracked with
@@ -87,8 +82,30 @@ GAINS = {
     # that's far too small a sample to credit the gain for it. Don't read the tracking
     # quality of any single test_attitude_loop.py run as evidence this value is right -
     # revisit once the underlying noise source is understood, not before.
-    "att_rp":  {"kp": 6.0, "ki": 0.5, "kd": 0.5, "integral_limits": (-1.0, 1.0)},
-    "att_yaw": {"kp": 1.5, "ki": 0.3, "kd": 0.05, "integral_limits": (-1.0, 1.0)},
+    # d_filter_alpha added, 2026-09-26 - att_rp/att_yaw's kd was DEAD until today (see
+    # attitude_loop()'s fix comment in cascade.py: it called PID.update() with
+    # measurement hardcoded to 0.0, so derivative-on-measurement always computed to
+    # exactly zero regardless of kd's value). Now that it's genuinely active for the
+    # first time, it's differentiating a real, EKF-noisy error signal with no
+    # filtering - same risk rate_rp/rate_yaw's own d_filter_alpha already guards
+    # against ("kd differentiates the RAW gyro reading... without filtering that noise
+    # gets amplified straight into torque chatter"). Confirmed this bit immediately:
+    # first `run_sim.py` test after the attitude_loop fix hit tau=(100,100,100) (full
+    # saturation on all 3 axes) and rate_sp pinned at its 3.0 rad/s cap on two axes,
+    # from a modest ~4-6 degree tilt state - a derivative kick, not a real disturbance
+    # response. NOT yet re-tested with this filter in place.
+    # kd raised 0.5->1.5, 2026-09-26 - post D-term-fix trials all show the same shape
+    # (smooth, accelerating tilt growth over ~2-4s, no oscillation, then a final
+    # saturation event) regardless of the filter/gyro-clamp fixes tried - the classic
+    # signature of insufficient damping, not a bug. kd was NEVER tuned (it was dead
+    # until today), so this is genuinely a first attempt, not a refinement.
+    "att_rp":  {"kp": 6.0, "ki": 0.5, "kd": 1.5, "integral_limits": (-1.0, 1.0), "d_filter_alpha": 0.2},
+    # kd raised 0.05->0.3, 2026-09-26 - with att_rp's kd fixed/raised, roll/pitch stayed
+    # under 5 degrees far longer than any previous trial, but yaw diverged FIRST this
+    # time (7.8->21.9->oscillating). att_yaw's kp:kd ratio was 30:1 (1.5:0.05) vs
+    # att_rp's now much more damped 4:1 (6.0:1.5) - brought into a similar proportion
+    # (1.5:0.3 = 5:1). Not yet tested.
+    "att_yaw": {"kp": 1.5, "ki": 0.3, "kd": 0.3, "integral_limits": (-1.0, 1.0), "d_filter_alpha": 0.2},
     # rate_rp's old kp=150 turned even a fractional rad/s rate error into a torque
     # command that immediately saturated the +/-250 limit - bang-bang, not smooth
     # control, and almost certainly what flipped it. Cut ~10x as a first pass.

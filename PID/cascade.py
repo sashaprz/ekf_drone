@@ -135,9 +135,19 @@ class Cascade:
             q_err = -q_err  # shortest-path fix: q and -q are the same rotation
         err_roll, err_pitch, err_yaw = q_err[1:]  # small-angle approx of the rotation needed
 
-        rate_roll_sp = self.att_pid_x.update(err_roll, 0.0, dt)
-        rate_pitch_sp = self.att_pid_y.update(err_pitch, 0.0, dt)
-        rate_yaw_sp = self.att_pid_z.update(err_yaw, 0.0, dt)
+        # setpoint=0/measurement=-err (not setpoint=err/measurement=0), 2026-09-26 fix -
+        # error math is identical (0-(-err)=err), but PID.update()'s derivative-on-
+        # measurement needs `measurement` to actually change over time to mean anything.
+        # With measurement hardcoded to the constant 0.0 (the old call), last_measurement
+        # is 0.0 forever and raw_derivative computes to exactly 0.0 on every call - kd on
+        # att_rp/att_yaw was fully inert, no matter its value, the entire time this loop
+        # has existed. Now measurement=-err genuinely tracks the evolving attitude error,
+        # so kd finally damps how fast that error is changing, same role it plays in
+        # rate_loop/velocity_loop/position_loop (which all pass a real, changing
+        # measurement already - this was the one loop that didn't).
+        rate_roll_sp = self.att_pid_x.update(0.0, -err_roll, dt)
+        rate_pitch_sp = self.att_pid_y.update(0.0, -err_pitch, dt)
+        rate_yaw_sp = self.att_pid_z.update(0.0, -err_yaw, dt)
         return np.array([rate_roll_sp, rate_pitch_sp, rate_yaw_sp])
 
     def rate_loop(self, rate_setpoint, state, dt):

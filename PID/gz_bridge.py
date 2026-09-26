@@ -40,7 +40,21 @@ class GazeboBridge:
         self._motor_pub = self._node.advertise(MOTOR_TOPIC, Actuators)
 
     def _on_imu(self, msg):
-        self._gyro = (msg.angular_velocity.x, msg.angular_velocity.y, msg.angular_velocity.z)
+        # sanity bound, 2026-09-26: same corrupted-message risk as the accel bound
+        # below (same IMU message, gz-transport occasionally delivers a corrupted one)
+        # but this field was never guarded - FINAL_gps.py's `state['rate']` is a
+        # straight passthrough of this value (no gating, unlike accel's chi-squared
+        # gate), so a single bad gyro reading hits the rate loop completely
+        # unprotected. Confirmed via a full run_sim.py flight log: rate_meas jumped
+        # from ~0 to (-9.84,-22.36,-3.29) rad/s in a single tick, immediately
+        # saturating all 3 torque channels, right at the point where the 2026-09-26
+        # full-cascade divergence begins. 50 rad/s (~2865 deg/s) is far beyond
+        # anything this vehicle's real torque authority could produce in one ~200Hz
+        # control tick even fully saturated, and far below what's needed to reject
+        # any real (if fast) rotation.
+        gyro = (msg.angular_velocity.x, msg.angular_velocity.y, msg.angular_velocity.z)
+        if math.sqrt(gyro[0]**2 + gyro[1]**2 + gyro[2]**2) <= 50.0:
+            self._gyro = gyro
 
         # sanity bound, 2026-09-26: gz-transport occasionally delivers a genuinely
         # corrupted IMU message with an accel magnitude in the hundreds of m/s^2 (40+g,

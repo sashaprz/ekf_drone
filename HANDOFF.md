@@ -24,11 +24,15 @@ horizontal drift *worse*, not better). With all of that fixed, a `vz` step test 
 shows `vx`/`vy` staying bounded and settling instead of diverging - the first time any
 loop above rate has stayed stable for a full multi-second test.
 
-**Full-cascade flight has still not been re-tested since ANY of these fixes.** Every
-prior full-cascade result (including the 71s-runaway/yaw-spin diagnosis) predates
-discovering the vehicle usually wasn't even airborne, so treat all of it as stale.
-Next concrete step: try `run_sim.py` for real now that rate/attitude/velocity have each
-been individually validated - see "Recommended next steps".
+**Full-cascade flight WAS re-tested (2026-09-26, after all the above fixes) - real
+progress, new open problem.** `run_sim.py` now climbs cleanly to ~1.8m (matches the
+2m setpoint reasonably) before a new divergence starts around t~1.85-1.90s - pitch
+jumps from ~1 degree to -9.8 degrees and grows smoothly from there into a full tumble
+by t~4s. This is genuinely new territory: every prior full-cascade result (including
+the old 71s-runaway/yaw-spin diagnosis) predates discovering the vehicle usually
+wasn't even airborne, so none of that old diagnosis applies here. **Root cause not yet
+found** - see "What's NOT resolved" for what's been ruled out and what's still open.
+This is the current blocker on an actual full flight - see "Recommended next steps".
 
 ## How the user likes to work
 
@@ -271,12 +275,37 @@ This took many iterations to get reliable - follow it exactly.
 
 ## What's NOT resolved
 
-- **Full-cascade flight has not been re-tested since the 2026-09-26 rate-loop fixes.**
-  Everything below this line about the 71s runaway/instability predates discovering
-  that `test_rate_loop.py` wasn't validly testing anything (see fixes #5/#6 above) - it
-  may or may not still apply once the attitude loop is validated and a real full-cascade
-  run is tried again. Don't assume the yaw-spin failure mode is still the live bug;
-  it's quite possibly explained by the same yaw-authority gap that's now fixed.
+- **NEW, current blocker: full-cascade flight diverges around t~1.85-1.90s, root cause
+  not yet found (2026-09-26).** `run_sim.py` climbs cleanly to ~1.8m (setpoint is 2m),
+  then pitch jumps from ~1 degree to -9.8 degrees in about 0.1s and grows smoothly from
+  there (not a discontinuous jump like the old EKF corruption bugs - genuinely
+  continuous, physically consistent growth in both the angle and its rate) into a full
+  tumble by t~4s. What's been ruled out:
+  - **Not EKF/sensor corruption** - checked `EKF_ACCEL` diagnostic through the exact
+    divergence window, deviation stayed small and unremarkable (<0.04 m/s² the whole
+    time, no spike). Both of this session's EKF fixes (items #7/#8) are confirmed
+    working correctly here.
+  - **Not simply "unbounded position drift"** - the leading theory when this was found
+    was that `pos_xy` being zeroed let velocity residuals integrate into unbounded
+    position drift, eventually overwhelming `vel_xy`. Tried giving `pos_xy` real gains
+    (kp=1.0, kd=0.5) as a direct test of this theory: divergence happened *earlier*
+    (~t=1.92s vs ~1.85-1.90s), not later or avoided. Reverted - don't re-enable
+    `pos_xy` based on this same reasoning without new evidence.
+  - Correlated against position at the original (pos_xy=0) divergence: `pos.x`'s growth
+    rate roughly tripled (0.45->1.3 m/s) at the same moment pitch started jumping - so
+    *something* about growing horizontal velocity/motion is involved, just not fixed by
+    the "add outer-loop damping" theory tried so far.
+  - Suspects not yet checked: (1) the attitude loop's small-angle quaternion-error
+    approximation (`attitude_loop()`'s `q_err[1:]` used directly as if it were an Euler
+    angle vector) breaking down once real tilt grows past a few degrees - this test is
+    the first time any validated-in-isolation test has let tilt grow this far under
+    real closed-loop dynamics; (2) some interaction specific to running
+    position->velocity->attitude->rate at their real intended sub-rates (30/75/200Hz)
+    that doesn't show up in the simplified test harnesses, which each only exercise
+    2-3 of the 4 loops at once; (3) `pos_z`'s behavior right as altitude crosses/
+    approaches the 2m setpoint (kp=1.5, ki=0, kd=0.3, never revisited this session) -
+    worth checking whether altitude actually overshoots and how the resulting velocity
+    reversal interacts with everything else, independent of the horizontal-axis theory.
 - **`torque_range_rp`/`torque_range_yaw` loosening is no longer the obvious next
   experiment it was.** Yaw's fix was a `kp` increase (15->150) that works fine within
   the existing `±100` range without needing to loosen it - `tau_yaw` reached ~45 on a
@@ -379,24 +408,36 @@ saturating. Not yet tested: `vx`/`vy` as the STEPPED axis (only tested them as t
 `vel_xy`'s retuned gains (kp=0.8/ki=0.2/kd=0.6, itself not yet independently verified
 against a real step, only against arresting drift).
 
-1. **Try `run_sim.py` for real** - this is the actual goal ("does it fly"), and rate,
-   attitude, and velocity have each now been individually validated in isolation for
-   the first time. Expect new problems to surface (every layer so far has had at least
-   one) - that's normal, not a sign the lower layers are wrong. `pos_xy`/`pos_z` still
-   use old, never-revisited gains (`pos_z`: kp=1.5/ki=0/kd=0.3; `pos_xy` still zeroed) -
-   don't assume position loop is validated just because velocity is.
-2. **If it doesn't fly cleanly**, isolate `test_velocity_loop.py`'s `vx`/`vy` step
-   response (not yet done) and/or build a `test_position_loop.py` (same pattern, one
-   loop further out) before going back to full-cascade debugging blind - this session's
-   whole arc has been "isolate before trusting the full stack," don't abandon that now
-   that the goal is close.
-3. **Standard per-axis tuning heuristic** (still applies): raise `kp` until you see
-   sustained oscillation in the log, back off to ~50-70% of that value, add `kd` to
-   damp remaining overshoot, add a small `ki` last only if there's steady-state error
-   that `kp`+`kd` alone don't close. Edit gains in `run_sim.py`'s `GAINS` dict (both
-   scripts import from there). Don't trust a single trial's result for any change here -
-   real-time sensor/timing jitter under WSL means single trials carry real noise;
-   average/range over a few before concluding a gain change helped or hurt.
+**`run_sim.py` tried for real, 2026-09-26 - climbs cleanly, then diverges at t~1.85-
+1.90s.** See "What's NOT resolved" above for the full writeup of what's been ruled out
+(not EKF corruption, not fixed by enabling `pos_xy`). This is the current blocker.
+
+1. **Chase the full-cascade divergence next** - it's the actual gate on "does it fly."
+   Concrete next moves, roughly in order of how cheap they are to check:
+   - Add `pos.z` and a horizontal-speed readout to `run_sim.py`'s own print (it already
+     prints `pos=(x,y,z)` every 30 iterations - just eyeball whether altitude
+     overshoots past 2m right around t~1.8s, since `pos_z` has no integral and was
+     never revisited this session).
+   - Build `test_position_loop.py` (same pattern as the others, one loop further out -
+     position_loop -> velocity_loop -> attitude_loop -> rate_loop) to isolate whether
+     this is a position-loop-specific interaction or something that only shows up
+     with all 4 loops running at their real relative sub-rates together.
+   - If tilt really is the trigger, check whether `attitude_loop()`'s small-angle
+     `q_err[1:]` approximation is still valid at the tilt angles involved (a few
+     degrees should be fine; whatever `pitch` is right before the jump is the number
+     to check against).
+2. **Standard per-axis tuning heuristic** (still applies once the cause is found):
+   raise `kp` until you see sustained oscillation in the log, back off to ~50-70% of
+   that value, add `kd` to damp remaining overshoot, add a small `ki` last only if
+   there's steady-state error that `kp`+`kd` alone don't close. Edit gains in
+   `run_sim.py`'s `GAINS` dict (both scripts import from there). Don't trust a single
+   trial's result for any change - real-time sensor/timing jitter under WSL means
+   single trials carry real noise; average/range over a few before concluding a gain
+   change helped or hurt.
+3. Not yet tested: `test_velocity_loop.py` with `vx`/`vy` as the STEPPED axis (only
+   tested as "should stay at 0" background axes so far) - worth doing before fully
+   trusting `vel_xy`'s retuned gains against a real step, not just against arresting
+   drift.
 4. Re-check the `ki` addition to `att_rp`/`att_yaw` noted as unconfirmed above once
    there's bandwidth - it predates all of this session's fixes and was never resolved
    either way.
