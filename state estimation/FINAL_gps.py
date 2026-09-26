@@ -315,11 +315,28 @@ class DroneEKF:
         #also independently closes this, but a good P0 remains cheap insurance).
         global _calibration_step
         _calibration_step = 0  # reset so a later DroneEKF() doesn't inherit an earlier one's leftover count
-        self.q, (self.bias_x, self.bias_y, self.bias_z), (self.accel_bias_x, self.accel_bias_y, self.accel_bias_z), \
-            (self.mag_bias_x, self.mag_bias_y, self.mag_bias_z), _P_cal = \
-            calibration.calibrate(_cal_get_gyro, _cal_get_accel, _cal_get_mag,
-                                   dwell_steps=_CAL_DWELL_STEPS, wiggle_steps=400, dt=_CAL_DT,
-                                   gravity=GRAVITY, accel_noise_var=ACCEL_NOISE_STD**2, mag_noise_var=MAG_NOISE_STD**2)
+        if sensors is None:
+            # synthetic self-contained mode: use the scripted dwell+wiggle functions,
+            # which are specifically designed to recover this file's own TRUE_GYRO_BIAS/
+            # TRUE_ACCEL_BIAS/TRUE_MAG_BIAS constants
+            self.q, (self.bias_x, self.bias_y, self.bias_z), (self.accel_bias_x, self.accel_bias_y, self.accel_bias_z), \
+                (self.mag_bias_x, self.mag_bias_y, self.mag_bias_z), _P_cal = \
+                calibration.calibrate(_cal_get_gyro, _cal_get_accel, _cal_get_mag,
+                                       dwell_steps=_CAL_DWELL_STEPS, wiggle_steps=400, dt=_CAL_DT,
+                                       gravity=GRAVITY, accel_noise_var=ACCEL_NOISE_STD**2, mag_noise_var=MAG_NOISE_STD**2)
+        else:
+            # live-bridge mode: calibrating against the synthetic _cal_get_* functions here
+            # would learn a bias correction for TRUE_GYRO_BIAS etc., which have nothing to do
+            # with this sensor's actual (near-zero) bias - inject a real, wrong, persistent
+            # rate error into every future step(). Use the real sensors instead. Dwell-only
+            # (no wiggle - nothing here can command an actual wiggle maneuver), so accel_bias/
+            # mag_bias may keep some tilt/heading ambiguity, but gyro_bias (this file's real
+            # problem) is fully observable at rest regardless - see calibration.py's docstring.
+            self.q, (self.bias_x, self.bias_y, self.bias_z), (self.accel_bias_x, self.accel_bias_y, self.accel_bias_z), \
+                (self.mag_bias_x, self.mag_bias_y, self.mag_bias_z), _P_cal = \
+                calibration.calibrate(self._get_gyro, self._get_accel, self._get_mag,
+                                       dwell_steps=_CAL_DWELL_STEPS, wiggle_steps=0, dt=_CAL_DT,
+                                       gravity=GRAVITY, accel_noise_var=ACCEL_NOISE_STD**2, mag_noise_var=MAG_NOISE_STD**2)
         #main loop below uses get_gyro/get_accel/get_mag (the constant "in-flight" stubs), not the _cal_* functions
 
         #map calibration's 12x12 P (attitude, gyro_bias, accel_bias, mag_bias, in that order)
@@ -473,8 +490,20 @@ class DroneEKF:
         S_accel_gate = self.H_accel @ self.P @ self.H_accel.T + R_accel_base
         d_squared = residual_accel.T @ np.linalg.inv(S_accel_gate) @ residual_accel
 
+        # TEMP DIAGNOSTIC (2026-09-26) - chasing a sudden single-tick attitude jump seen
+        # in test_attitude_loop.py while state['rate'] (raw gyro, doesn't depend on q)
+        # stays smooth through the same tick - theory is a bad accel correction slipping
+        # through during real (non-hover) acceleration. Remove once resolved.
+        correction_accel = K_accel @ residual_accel
         if d_squared <= chi2_threshold:
-          self.apply_correction(K_accel @ residual_accel)
+            print(f"EKF_ACCEL t={now:.6f} FIRED   dev={deviation:.4f} d2={d_squared:8.2f} "
+                  f"thr={chi2_threshold:.2f} dtheta={np.linalg.norm(correction_accel[0:3]):.4f}", flush=True)
+        else:
+            print(f"EKF_ACCEL t={now:.6f} REJECTED dev={deviation:.4f} d2={d_squared:8.2f} "
+                  f"thr={chi2_threshold:.2f}", flush=True)
+
+        if d_squared <= chi2_threshold:
+          self.apply_correction(correction_accel)
           #this is the second p update, after we incorporate a measuremnt uncertainty goes down bc that is another measurement source
           self.P = (I - K_accel @ self.H_accel) @ self.P @ (I - K_accel @ self.H_accel).T + K_accel @ R_accel @ K_accel.T
         #else: skip entirely - state and P stay exactly as the predict step left them
