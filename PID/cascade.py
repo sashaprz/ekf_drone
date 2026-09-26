@@ -18,6 +18,17 @@ LIMITS = {"max_tilt_rad": ..., "max_rate": ..., "thrust_range": ..., "motor_rang
 FRAME = "quad_x"
 GRAVITY = 9.80665  # matches FINAL_gps.py, so accel<->tilt conversion agrees with the EKF's frame
 
+# feedforward baseline for vel_z (mass=2.0kg, motorConstant=8.54858e-06, g=9.80665,
+# solved through thrust=motorConstant*omega^2 -> ~757 rad/s/motor) - matches
+# FINAL_gps.py/the test harnesses' HOVER_THRUST. Without this, vel_z's PID has to build
+# the entire hover thrust from its own integral term alone from a cold start, which
+# takes many seconds (ki=20 needs integral~=38 to reach 757, i.e. ~38 (m/s)*s of
+# accumulated velocity error) - confirmed via test_velocity_loop.py: starting genuinely
+# airborne (not resting on the ground, where the confound documented in HANDOFF.md hides
+# this), thrust only reached ~153 after 2s of trying to hold hover, and the vehicle fell
+# over 3.5m in the meantime. ki now only has to trim around this baseline, not build it.
+VEL_Z_HOVER_THRUST_FF = 757.0
+
 #cascade is the thing that turns "i want drone at this position" into "here's how hard each motor should spin"
 #chains 4 pid loops -> each loop only has to solve one narrow porblem, and each loop can run at the frequency suited to how fast that physical quanitity actually changes
 #position changes slowly (10-50Hz). velocity (50-100hz), attitude (100-250hz), rate/gyro (500-1khz)
@@ -81,14 +92,29 @@ class Cascade:
     def velocity_loop(self, vel_setpoint, state, dt):
         # vel error -> desired accel -> (roll_sp, pitch_sp, thrust)
         # x/y accel gets rotated by -yaw (world frame -> heading frame) then mapped to tilt;
-        # z accel is thrust directly, the vel_pid_z output_limits already clamp it to thrust_range
+        # z is VEL_Z_HOVER_THRUST_FF (see its own comment) plus a PID trim - vel_pid_z's
+        # output_limits are a delta range around that baseline now, not absolute thrust
         ax = self.vel_pid_x.update(vel_setpoint[0], state["vel"][0], dt)
         ay = self.vel_pid_y.update(vel_setpoint[1], state["vel"][1], dt)
-        thrust = self.vel_pid_z.update(vel_setpoint[2], state["vel"][2], dt)
+        thrust_trim = self.vel_pid_z.update(vel_setpoint[2], state["vel"][2], dt)
+        thrust = VEL_Z_HOVER_THRUST_FF + thrust_trim
 
         yaw = yaw_from_quat(state["quat"])
         a_fwd = ax * np.cos(yaw) + ay * np.sin(yaw)
-        a_right = -ax * np.sin(yaw) + ay * np.cos(yaw)
+        # a_right sign fixed, 2026-09-26: at yaw=0, body-right = world -Y (FLU: Y=left),
+        # so a_right (desired RIGHTWARD accel) should be -ay, not +ay. The old formula
+        # (-ax*sin(yaw) + ay*cos(yaw), i.e. +ay at yaw=0) fed roll_sp the wrong sign -
+        # confirmed empirically via test_velocity_loop.py: with vy very negative (already
+        # drifting right, in -Y) and vel_pid_y correctly outputting positive ay (to push
+        # back toward +Y), roll_sp saturated at its positive max_tilt_rad ceiling while vy
+        # kept getting MORE negative the whole test - the controller was trying harder in
+        # exactly the direction (+roll = rightward accel, per mix()'s own verified
+        # convention) that made the drift worse, not better. This is a different bug from
+        # the roll_sp-sign fix already documented above/in HANDOFF.md - that one was
+        # already correct for the a_fwd/pitch axis and for whatever single-axis scenario
+        # it was validated against; this a_right formula's own sign was never independently
+        # re-verified until now.
+        a_right = ax * np.sin(yaw) - ay * np.cos(yaw)
 
         pitch_sp = np.arctan2(a_fwd, GRAVITY)
         # +roll = right-side-down in Gazebo's FLU body frame (verified against mix()'s

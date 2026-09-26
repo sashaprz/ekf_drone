@@ -41,7 +41,22 @@ class GazeboBridge:
 
     def _on_imu(self, msg):
         self._gyro = (msg.angular_velocity.x, msg.angular_velocity.y, msg.angular_velocity.z)
-        self._accel = (msg.linear_acceleration.x, msg.linear_acceleration.y, msg.linear_acceleration.z)
+
+        # sanity bound, 2026-09-26: gz-transport occasionally delivers a genuinely
+        # corrupted IMU message with an accel magnitude in the hundreds of m/s^2 (40+g,
+        # impossible for this vehicle) - confirmed via FINAL_gps.py's EKF_ACCEL
+        # diagnostic, correlated with the intermittent single-tick attitude corruption
+        # seen throughout tuning (test_attitude_loop.py, test_velocity_loop.py). The
+        # EKF's own chi-squared gate catches most of these, but the transient covariance
+        # disruption right around a spike lets at least one moderately-bad reading slip
+        # through with a large one-step correction. 6g is generous headroom above any
+        # real maneuver this vehicle does (confirmed accel deviations during normal,
+        # even aggressive, testing stay under ~1 m/s^2) and far below the observed
+        # garbage values (422, 713 m/s^2) - reject and hold the last good reading rather
+        # than feed this to the EKF at all.
+        accel = (msg.linear_acceleration.x, msg.linear_acceleration.y, msg.linear_acceleration.z)
+        if math.sqrt(accel[0]**2 + accel[1]**2 + accel[2]**2) <= 6 * 9.80665:
+            self._accel = accel
 
     def _on_mag(self, msg):
         v = np.array([msg.field_tesla.x, msg.field_tesla.y, msg.field_tesla.z])

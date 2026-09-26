@@ -9,16 +9,26 @@ entirely. This is deliberate: the user is building their own EKF+PID stack from
 scratch as a learning project, and wants to validate it against real physics before
 ever touching real hardware or PX4/Betaflight integration (a separate, later step).
 
-**Current status (updated after the 2026-09-26 session): the rate loop is now
-confirmed solid on all three axes in isolation** (see "What's confirmed fixed" below -
-a ground-contact bug meant every earlier `test_rate_loop.py` run was never actually
-airborne, and a yaw-authority gap meant yaw never really got tested at all). With both
-fixed, roll/pitch/yaw all show clean, no-overshoot step responses. Full-cascade flight
-(this session's earlier best run flew ~71s before diverging into an unrecoverable
-runaway yaw spin) has **not been re-tested since these fixes** - that diagnosis predates
-discovering the rate loop wasn't being validly tested at all, so don't assume the old
-71s-runaway failure mode is still accurate. Next step is the attitude-loop test harness
-(see "Recommended next steps"), not jumping straight back to full-cascade flight.
+**Current status (updated late in the 2026-09-26 session): rate, attitude, and now
+velocity loops have each been isolated, tested, and had real bugs found and fixed** -
+see "What's confirmed fixed" below. This was a long chain: a ground-contact bug meant
+early rate-loop tests were never airborne; a yaw-authority gap meant yaw was never
+really tested; the attitude loop uncovered a genuine intermittent EKF corruption bug
+(traced all the way to garbage IMU sensor readings from Gazebo, now filtered at the
+bridge); the velocity loop then uncovered a *second*, different EKF bug (accel gating
+using raw instead of bias-corrected deviation, causing a real sustained acceleration to
+get silently absorbed into `accel_bias` and freezing `state['vel']`), a missing
+feedforward on `vel_z` (real fall risk on cold start), and a genuine sign bug in
+`velocity_loop()`'s `a_right` term (was driving `roll_sp` in the direction that made
+horizontal drift *worse*, not better). With all of that fixed, a `vz` step test now
+shows `vx`/`vy` staying bounded and settling instead of diverging - the first time any
+loop above rate has stayed stable for a full multi-second test.
+
+**Full-cascade flight has still not been re-tested since ANY of these fixes.** Every
+prior full-cascade result (including the 71s-runaway/yaw-spin diagnosis) predates
+discovering the vehicle usually wasn't even airborne, so treat all of it as stale.
+Next concrete step: try `run_sim.py` for real now that rate/attitude/velocity have each
+been individually validated - see "Recommended next steps".
 
 ## How the user likes to work
 
@@ -204,6 +214,60 @@ This took many iterations to get reliable - follow it exactly.
    no overshoot, settles back to ~0 in a clean exponential decay after the step ends -
    arguably the best-behaved axis now, a big change from being "the worst axis" in
    every previous full-cascade run.
+7. **The intermittent single-tick EKF attitude corruption (the "probable EKF robustness
+   gap" flagged earlier this session) was actually corrupted sensor data, not an EKF
+   math bug.** Root-caused via `FINAL_gps.py`'s `EKF_ACCEL` diagnostic (still in place,
+   `TEMP DIAGNOSTIC` comment) correlated against `test_velocity_loop.py` output: right
+   before every corruption event, raw accel deviation spiked to 400-700+ m/s² (43-73g,
+   physically impossible), correctly REJECTED by the chi-squared gate - but sandwiched
+   between two such spikes was one `FIRED` correction with `d2` just under threshold and
+   a large `dtheta` (~0.53 rad). `gz-transport` was occasionally delivering genuinely
+   corrupted IMU messages. **Fix**: `gz_bridge.py`'s `_on_imu()` now rejects any accel
+   reading over 6g and holds the last good value instead of handing it to the EKF at
+   all. Confirmed fixed: max deviation across a full test run dropped from 713 m/s² to
+   2.76 m/s² (physical).
+8. **Separately, `state['vel']` could freeze bit-for-bit for 0.5+ seconds during real,
+   sustained acceleration** (found immediately after fix #7, via `test_velocity_loop.py
+   vz 0.5 3.0` - confirmed genuine, not a display bug: altitude kept integrating
+   linearly from the frozen velocity value the whole time). Root cause: `FINAL_gps.py`'s
+   accel deviation/gate (`accel_magnitude`/`deviation`/`R_accel`) was computed from RAW
+   accel, but the actual prediction step and residual both use BIAS-CORRECTED accel -
+   different signals. A real, sustained, growing acceleration (e.g. this test's own
+   climbing thrust) got accepted through the gate as a series of individually-small
+   corrections (each fine per raw deviation), each one nudging `accel_bias` a little,
+   until the bias had absorbed enough of the real signal that the bias-corrected accel
+   fed to prediction stayed anomalously close to gravity-only - so velocity stopped
+   responding to real thrust changes. **Fix**: moved the `accel_magnitude`/`deviation`/
+   `R_accel` computation to after `corrected_accel_x/y/z`, using the bias-corrected
+   values (see the comment in `FINAL_gps.py`'s `step()`). Confirmed fixed: velocity now
+   updates continuously through sustained acceleration, no more freezing.
+9. **`vel_z` had no feedforward term - its PID had to build the entire ~757 hover
+   thrust from its own integral alone.** With `ki=20`, reaching hover requires the
+   integral to reach ~38 (38 (m/s)·s of accumulated velocity error) - confirmed via
+   `test_velocity_loop.py`: holding vel_sp=0 from a genuinely airborne state (not
+   resting on the ground, which hides this - see the ground-contact bug above), thrust
+   only reached ~153 after 2s and the vehicle fell over 3.5m. **Fix**: added
+   `VEL_Z_HOVER_THRUST_FF=757.0` in `cascade.py`, added to `vel_pid_z`'s output before
+   returning as `thrust`. `vel_z`'s `output_limits`/`integral_limits` (in `run_sim.py`'s
+   `GAINS`/`LIMITS`) changed from `(0,1000)` to a trim range `(-400,240)` accordingly.
+   Confirmed fixed: warmup thrust now reaches ~733-757 and holds altitude stable
+   immediately, no fall.
+10. **`velocity_loop()`'s `a_right` term had a sign bug, separate from the roll_sp sign
+    bug already fixed earlier (item #2)** - `a_right = -ax*sin(yaw) + ay*cos(yaw)`
+    reduces to `+ay` at yaw≈0, but body-right = world -Y in FLU (Y=left), so `a_right`
+    (desired RIGHTWARD accel) should be `-ay`, not `+ay`. Confirmed empirically via
+    `test_velocity_loop.py` with `roll_sp`/`pitch_sp` logged: with `vy` very negative
+    (drifting right) and `vel_pid_y` correctly outputting positive `ay` to correct it,
+    `roll_sp` saturated at its positive `max_tilt_rad` ceiling and STAYED there while
+    `vy` kept getting more negative all test - the controller was trying harder in
+    exactly the direction that made it worse (per `mix()`'s own already-verified "+roll
+    = rightward accel" convention). **Fix**: `a_right = ax*sin(yaw) - ay*cos(yaw)` (full
+    sign flip). After the fix alone, horizontal drift got worse but qualitatively
+    different - `roll_sp`/`pitch_sp` oscillating between +/- max instead of pinned
+    one-sided, the signature of a now-correctly-signed but underdamped negative-feedback
+    loop, not a wrong-signed one. Also re-tuned `vel_xy`: `kp` 2.0->0.8, `kd` 0.3->0.6.
+    Confirmed fixed together: `vx`/`vy` now stay bounded and settle over a full 3s test
+    instead of diverging - first time any loop above rate has stayed stable that long.
 
 ## What's NOT resolved
 
@@ -238,39 +302,12 @@ This took many iterations to get reliable - follow it exactly.
 - **Root cause of the OLD full-cascade instability was never isolated to one loop**
   before the fixes above - worth re-establishing whether it's still true now that the
   rate loop is actually validated.
-- **Probable EKF robustness gap under real linear acceleration, found via
-  `test_attitude_loop.py` (2026-09-26).** Every attitude-loop trial so far (roll, 0.2
-  rad step) eventually suffers a sudden, large, single-print-interval jump in computed
-  attitude (e.g. tilt.roll: 0.061 -> 2.379 rad between two ~0.03s-apart samples) that
-  coincides with an altitude/velocity discontinuity. Two things rule out the simpler
-  explanations: (1) `state['rate']` (raw bias-corrected gyro, doesn't depend on the
-  quaternion at all) stays smooth and physically continuous straight through the same
-  jump (0.590 -> 0.755, no discontinuity) - so this isn't a real physical event or a
-  control/mixer bug, it's specifically the EKF's `self.q` that's discontinuous. (2)
-  Resetting the rate/attitude PID integrators right after liftoff (see
-  `test_common.reset_cascade_pids()`, added this session) changed the timing of the
-  blowup (~1.5s vs ~2.4s into a similar trial) but did not prevent it - so it isn't PID
-  windup either. **Leading theory, not yet confirmed**: by the time this happens the
-  vehicle has picked up real horizontal velocity/acceleration from the sustained tilt
-  (same mechanism as the velocity-driven-drift note above) - `FINAL_gps.py`'s own
-  docstring already flags that the accelerometer correction assumes hover-like
-  (low-acceleration) conditions ("accelerometer doesn't work when drone accelerating
-  hard"), so a bad accel correction slipping past the chi-squared gate during a real
-  acceleration burst could inject a large one-step `d_theta` via `apply_correction()` -
-  which would look exactly like this: smooth gyro, corrupted quaternion. **Diagnostic
-  added, not yet confirmed**: `FINAL_gps.py`'s accel-correction block now has a `TEMP
-  DIAGNOSTIC` print (`EKF_ACCEL t=... FIRED/REJECTED dev=... d2=... dtheta=...`) on
-  every tick - deliberately left in place, don't remove until this is resolved. **Also
-  confirmed intermittent**: 5 fresh `test_attitude_loop.py roll 0.2 3.0` trials this
-  session (after the liftoff/sub-rate/PID-reset fixes) - only 1 blew up, the other 4
-  were clean. So whatever this is doesn't fire every time; next time it recurs, check
-  the `attitude_test.log`/diagnostic output for an `EKF_ACCEL FIRED` entry at the exact
-  wall-clock tick the jump happens (correlate via the harness's own `start_t_epoch=...`
-  line against the diagnostic's `t=` epoch timestamps). This is a strictly deeper
-  problem than rate/attitude gain tuning - a corrupted state estimate looks like a
-  control failure no matter how good the gains are, and it's also the leading suspect
-  for the general run-to-run noise that made attitude-loop kp tuning unmeasurable this
-  session (see "Recommended next steps" below).
+- **RESOLVED, moved to "What's confirmed fixed" (items #7/#8)**: the intermittent
+  EKF attitude corruption first found via `test_attitude_loop.py` was root-caused to
+  two separate real bugs (corrupted IMU sensor data + raw-vs-bias-corrected accel
+  gating mismatch), both fixed. The `EKF_ACCEL` diagnostic in `FINAL_gps.py` is still
+  in place (harmless, verbose) - fine to remove now that both root causes are fixed and
+  confirmed, but not urgent.
 - `FINAL_gps.py`'s covariance matrix `P` has no growth cap. Confirmed once that a
   sufficiently wild, prolonged uncontrolled flight can overflow it to `NaN` via
   `RuntimeWarning: invalid value encountered in matmul`, permanently breaking that
@@ -321,21 +358,48 @@ so the comparison wasn't actually measurable. kp=6.0 had 0/3 blowups vs kp=3.0's
 too small a sample to credit the gain for it. **Kept kp=6.0 pragmatically, not because
 it's confirmed better** - see the comment on `att_rp` in `run_sim.py`'s `GAINS`.
 
-1. **Chase the EKF-under-acceleration theory** (see "What's NOT resolved" above) when it
-   next recurs - a corrupted attitude estimate looks exactly like a control failure, and
-   it's also the best current explanation for why gain comparisons aren't measurable.
-   The `EKF_ACCEL` diagnostic print in `FINAL_gps.py` is already in place for this.
-2. **Standard per-axis tuning heuristic** (still applies once the noise is understood):
-   raise `kp` until you see sustained oscillation in the log, back off to ~50-70% of
-   that value, add `kd` to damp remaining overshoot, add a small `ki` last only if
-   there's steady-state error that `kp`+`kd` alone don't close. Edit gains in
-   `run_sim.py`'s `GAINS` dict (both scripts import from there). Don't trust a single
-   trial's result for any change here - this session's data says the noise floor is
-   large enough that single trials aren't meaningful; average/range over several.
-3. Once attitude is validated, re-check the `ki` addition to `att_rp`/`att_yaw` noted
-   as unconfirmed above, then move to velocity/position, then finally a full-cascade
-   flight - the old 71s-runaway diagnosis should be treated as possibly-stale until
-   re-observed post-fix.
+**Attitude-loop kp noise is now explained** (was the EKF corruption bug, items #7/#8 -
+fixed) - the inconclusive kp=3.0-vs-6.0 comparison above should be considered stale and
+worth re-running now that the underlying noise source is fixed, before trusting kp=6.0.
+
+**Velocity loop: real bugs found and fixed as of 2026-09-26** (items #7-10) -
+`test_velocity_loop.py` + `run_velocity_test.sh`, same harness pattern, extended one
+loop further out (velocity_loop -> attitude_loop -> rate_loop, position_loop bypassed).
+Unlike the other harnesses, this one can't hold a fixed baseline thrust (vel_z's own
+output IS thrust) - see the WARMUP phase in its own docstring for why, and don't reset
+`vel_pid_z`'s integral after warmup (only rate/attitude PIDs) or you'll recreate the
+sag the warmup exists to avoid. Usage:
+```
+bash run_velocity_test.sh vz 0.5 3.0     # axis (vx/vy/vz), step (m/s), duration (s)
+```
+Confirmed clean after fixes #7-10: `vz 0.5 3.0` now shows `vx`/`vy` staying bounded and
+settling (not diverging) for a full 3s test, thrust climbing smoothly without
+saturating. Not yet tested: `vx`/`vy` as the STEPPED axis (only tested them as the
+"should stay at 0" background axes so far) - worth doing before fully trusting
+`vel_xy`'s retuned gains (kp=0.8/ki=0.2/kd=0.6, itself not yet independently verified
+against a real step, only against arresting drift).
+
+1. **Try `run_sim.py` for real** - this is the actual goal ("does it fly"), and rate,
+   attitude, and velocity have each now been individually validated in isolation for
+   the first time. Expect new problems to surface (every layer so far has had at least
+   one) - that's normal, not a sign the lower layers are wrong. `pos_xy`/`pos_z` still
+   use old, never-revisited gains (`pos_z`: kp=1.5/ki=0/kd=0.3; `pos_xy` still zeroed) -
+   don't assume position loop is validated just because velocity is.
+2. **If it doesn't fly cleanly**, isolate `test_velocity_loop.py`'s `vx`/`vy` step
+   response (not yet done) and/or build a `test_position_loop.py` (same pattern, one
+   loop further out) before going back to full-cascade debugging blind - this session's
+   whole arc has been "isolate before trusting the full stack," don't abandon that now
+   that the goal is close.
+3. **Standard per-axis tuning heuristic** (still applies): raise `kp` until you see
+   sustained oscillation in the log, back off to ~50-70% of that value, add `kd` to
+   damp remaining overshoot, add a small `ki` last only if there's steady-state error
+   that `kp`+`kd` alone don't close. Edit gains in `run_sim.py`'s `GAINS` dict (both
+   scripts import from there). Don't trust a single trial's result for any change here -
+   real-time sensor/timing jitter under WSL means single trials carry real noise;
+   average/range over a few before concluding a gain change helped or hurt.
+4. Re-check the `ki` addition to `att_rp`/`att_yaw` noted as unconfirmed above once
+   there's bandwidth - it predates all of this session's fixes and was never resolved
+   either way.
 
 ## Useful physical constants already derived (x500 model, don't re-derive)
 

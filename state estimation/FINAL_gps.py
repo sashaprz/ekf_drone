@@ -406,10 +406,6 @@ class DroneEKF:
         mag_x, mag_y, mag_z = self._get_mag()
         accel_x, accel_y, accel_z = self._get_accel()
 
-        #adaptive accel noise + bias-corrected gyro + accel
-        accel_magnitude = math.sqrt(accel_x**2 + accel_y**2 + accel_z**2)
-        deviation = abs(accel_magnitude - GRAVITY) #how far off from 1g is the accel reading?
-        R_accel = R_accel_base * (1 + k * deviation ** 2) #increase accel measurement noise if drone is accelerating
         corrected_gyro_x = gyro_x - self.bias_x
         corrected_gyro_y = gyro_y - self.bias_y
         corrected_gyro_z = gyro_z - self.bias_z
@@ -418,6 +414,22 @@ class DroneEKF:
         corrected_accel_x = accel_x - self.accel_bias_x
         corrected_accel_y = accel_y - self.accel_bias_y
         corrected_accel_z = accel_z - self.accel_bias_z
+
+        #adaptive accel noise - computed from the BIAS-CORRECTED accel, not raw (2026-09-26
+        # fix). Using raw accel here let deviation/R_accel and the gate's accept/reject
+        # decision run on a different signal than what the prediction step and the
+        # correction's own residual actually use (corrected_accel) - a real, sustained
+        # acceleration could get partially absorbed into accel_bias one small accepted
+        # correction at a time (each individually under the gate, computed from a raw
+        # deviation that didn't reflect how much the bias had already crept), while the
+        # bias-corrected accel fed to prediction stayed anomalously close to gravity-only.
+        # Confirmed via test_velocity_loop.py: state['vel'] froze bit-for-bit for ~0.6s of
+        # real, sustained climb thrust while raw deviation climbed smoothly through 0.08
+        # to 0.43 the whole time - the gate was deciding on a signal that didn't match
+        # what prediction was actually integrating.
+        accel_magnitude = math.sqrt(corrected_accel_x**2 + corrected_accel_y**2 + corrected_accel_z**2)
+        deviation = abs(accel_magnitude - GRAVITY) #how far off from 1g is the (bias-corrected) accel reading?
+        R_accel = R_accel_base * (1 + k * deviation ** 2) #increase accel measurement noise if drone is accelerating
 
         corrected_mag_x = mag_x - self.mag_bias_x
         corrected_mag_y = mag_y - self.mag_bias_y

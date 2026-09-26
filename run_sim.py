@@ -24,17 +24,54 @@ import cascade
 # time - expect it to sag noticeably before ki catches up, there's no gravity
 # feedforward term in cascade.py to shortcut that.
 GAINS = {
-    # DIAGNOSTIC: pos_xy/vel_xy zeroed out temporarily - isolates whether horizontal
-    # drift correction is the source of the aggressive tilting, or whether it's
-    # elsewhere (attitude/rate loop, EKF). Vehicle should just climb straight up,
-    # staying level, with no tilt commands at all regardless of any drift.
-    "pos_xy": {"kp": 0.0, "ki": 0.0, "kd": 0.0},
+    # pos_xy given real gains, 2026-09-26 - a real `run_sim.py` full-cascade attempt
+    # (first one since this session's rate/attitude/velocity fixes) climbed cleanly to
+    # ~1.8m, then pitch jumped from ~1 degree to -9.8 degrees around t=1.85-1.90s and
+    # grew smoothly from there into a full tumble by t~4s. Correlated against position:
+    # pos.x's growth rate roughly tripled (0.45->1.3 m/s) at the exact same moment. With
+    # pos_xy at zero, nothing pulls the vehicle back toward its target position - only
+    # vel_xy holds velocity near 0, so any small residual velocity is free to integrate
+    # into growing position drift indefinitely, and the x500's real velocity-scaling
+    # rotor-drag disturbance (documented earlier this session via the rate-loop tests)
+    # eventually overwhelms vel_xy's modest authority. This is exactly the next
+    # untuned rung on the inside-out ladder (position was always going to need real
+    # gains eventually) - starting guess, not yet independently verified in isolation.
+    #
+    # vel_xy given real gains, 2026-09-26 (was zeroed as a diagnostic predating this
+    # session, to isolate whether horizontal drift correction caused the old "aggressive
+    # tilting" failure - that diagnosis is stale now given everything found since: the
+    # ground-contact bug, yaw-authority gap, and vel_z's missing feedforward were all
+    # real, sufficient explanations on their own). Needed now because leaving vel_xy at
+    # zero means NOTHING bounds horizontal velocity, ever - confirmed via
+    # test_velocity_loop.py: even commanding vz alone (attitude target held level, so
+    # ax=ay=0 by construction with vel_xy's old zero gains), residual bias let vy drift
+    # unbounded past 40 m/s over a few seconds, which is almost certainly what triggered
+    # a real acceleration burst and the known intermittent EKF jump (see HANDOFF.md).
+    # kp/kd re-tuned 2026-09-26 after fixing a real a_right sign bug in cascade.py's
+    # velocity_loop() (see that fix's own comment) - roll_sp was saturating in the
+    # WRONG direction and monotonically failing to arrest drift before the fix; after
+    # the fix, drift got even worse but qualitatively different (roll_sp/pitch_sp
+    # oscillating between +/- max_tilt_rad rather than pinned one-sided) - the
+    # signature of a now-correctly-signed but underdamped/too-aggressive negative
+    # feedback loop (oscillation), not a wrong-sign one (which saturates one-sided and
+    # sits there). kp cut 2.0->0.8, kd raised 0.3->0.6 for more damping. NOT yet
+    # confirmed stable - re-test before trusting these values.
+    "pos_xy": {"kp": 1.0, "ki": 0.0, "kd": 0.5},
     "pos_z":  {"kp": 1.5, "ki": 0.0, "kd": 0.3},
-    "vel_xy": {"kp": 0.0, "ki": 0.0, "kd": 0.0, "integral_limits": (-5.0, 5.0)},
+    "vel_xy": {"kp": 0.8, "ki": 0.2, "kd": 0.6, "integral_limits": (-5.0, 5.0)},
     # cut further (40/60 -> 15/20) - across three runs now, instability tracked with
     # how fast/high thrust ramped up, not a fixed threshold - a gentler climb gives
     # attitude/rate loops room to keep up instead of fighting a fast-moving baseline
-    "vel_z":  {"kp": 15.0, "ki": 20.0, "kd": 0.0, "integral_limits": (0.0, 1000.0)},
+    #
+    # output_limits/integral_limits changed from (0,1000) to a trim range, 2026-09-26 -
+    # cascade.py's velocity_loop() now adds VEL_Z_HOVER_THRUST_FF (757, feedforward)
+    # before this PID's output, so it only needs to trim around hover, not build the
+    # whole thrust from its own integral (see VEL_Z_HOVER_THRUST_FF's comment in
+    # cascade.py for why that was a real problem - confirmed via test_velocity_loop.py,
+    # thrust only reached ~153 after 2s without the feedforward, vehicle fell >3.5m).
+    # Range is asymmetric to match real headroom around the 757 baseline (757-400=357
+    # min, 757+240=997 max, both comfortably inside the real 0-1000 motor range).
+    "vel_z":  {"kp": 15.0, "ki": 20.0, "kd": 0.0, "integral_limits": (-400.0, 240.0)},
     # ki added - logged data showed a slow, steady attitude drift (not oscillation) even
     # with pos_xy/vel_xy disabled: a pure-P attitude loop can't cancel a sustained
     # disturbance (motor spin-up/down asymmetry, gyroscopic coupling, etc), it just
@@ -75,7 +112,10 @@ GAINS = {
 }
 LIMITS = {
     "max_tilt_rad": math.radians(15), "max_rate": 3.0,  # down from 30 deg, extra margin while still tuning
-    "thrust_range": (0.0, 1000.0),      # per-motor baseline omega command (rad/s)
+    # vel_pid_z's OWN output_limits - a trim range around cascade.py's
+    # VEL_Z_HOVER_THRUST_FF feedforward now, not absolute thrust (see that constant's
+    # comment and vel_z's GAINS comment above for why this changed, 2026-09-26)
+    "thrust_range": (-400.0, 240.0),
     "motor_range": (0.0, 1000.0),       # matches x500's maxRotVelocity
     "max_vel_xy": 5.0, "max_vel_z": 3.0, "max_accel_xy": 5.0, "max_rate_yaw": 3.0,
     "torque_range_rp": (-100.0, 100.0),   # down from +/-250, omega perturbation not physical torque
