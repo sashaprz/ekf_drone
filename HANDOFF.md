@@ -1,5 +1,68 @@
 # Handoff: PID cascade tuning against Gazebo/x500
 
+## 2026-09-27 session: found and fixed the actual root cause of the run-to-run variance
+
+**The control loop (`run_sim.py` and every `test_*_loop.py` harness) was an
+unsynchronized busy loop, running at ~2000-3000Hz against sensor data that only
+actually updates at Gazebo's real IMU rate (~260Hz).** `GazeboBridge`'s `_gyro`/
+`_accel` fields are just "last value received" caches, mutated asynchronously by
+gz-transport's own background thread; the main loop never waited for a new message,
+it just spun and read whatever was cached `dt = now - last_t` measured pure wall-clock
+loop time, completely decoupled from real sensor arrival. Consequences, confirmed via
+the actual dt log data (`run_sim_full.log`, sampled every 30th tick, showed
+0.27-7.57ms with a 0.46ms median = up to ~2000Hz): most iterations reprocessed the
+exact same stale sensor reading, and the moment a genuinely new reading landed via the
+background thread was a race against the main loop's own OS-scheduled timing -
+non-deterministic by construction under WSL2 (already a noisier scheduler than bare
+metal, further loaded by WSLg's Gazebo GUI rendering). This is a clean, direct
+explanation for the run-to-run noise documented throughout this file (identical gains,
+identical code, wildly different divergence times - e.g. the att_rp kd=1.5 trial that
+diverged at t=5.3s once and t=2.9s on an immediate re-run) and for the intermittent
+single-tick sensor "corruption" events: a real sensor value jump divided by whatever
+near-random dt the busy loop happened to have at that instant produces an
+effectively-random-magnitude derivative kick straight into the rate loop (the
+innermost loop, with no sub-rate averaging to smooth it out - see
+`attitude_loop`'s own comment about needing to be held between sub-rate recomputes,
+which was a patch around this same symptom one level up).
+
+**Fix** (`gz_bridge.py`, `FINAL_gps.py`, `run_sim.py`, `test_common.py`, all three
+`test_*_loop.py` harnesses):
+- `GazeboBridge` now has a `threading.Event` set by `_on_imu()` and a
+  `wait_for_imu(timeout=0.1)` method - every control loop now blocks on this before
+  calling `ekf.step()`, so the loop's rate (and therefore every PID's dt) is paced to
+  real sensor arrival instead of busy-spinning. `timeout` is just a safety net against
+  a stalled topic, not the normal path.
+- `FINAL_gps.py` and `run_sim.py` both now clamp `dt` to `MAX_DT=0.05s` as a
+  defensive backstop against a genuine stall (WSL2/WSLg hiccup, GC pause) dumping an
+  unbounded integration/integral step in one tick - should essentially never bind now
+  that the loop is properly paced, but cheap insurance.
+
+**Verified via actual Gazebo trials, 2026-09-27 (see "What's confirmed fixed" #15 and
+below for the full detail):**
+- Loop dt is now consistently ~3.5-4.7ms (~250-260Hz), not the old 0.3-0.8ms chaos -
+  confirmed directly from `rate_test_verify.log`.
+- Rate-loop isolation test (`run_rate_test.sh roll 0.3 5.0`) tracked cleanly, no
+  saturation/oscillation, max accel deviation 2.78 m/s² (genuine physics, nowhere near
+  the 400+ m/s² corruption-era garbage values).
+- **`run_sim.py` (full cascade) survived a full 20-second test with `pos_xy=0` -
+  roll/pitch stayed under ~6 degrees almost the whole time, no tumble, no saturation
+  lockup.** This is the first time the full cascade has ever stayed controlled anywhere
+  near this long (previous best was t=5.3s before an unrecoverable yaw spike). The
+  fix's value isn't just "less noise" - it appears to have actually removed a real
+  destabilizing mechanism (the derivative-kick-on-stale-data effect above), not just
+  made results more consistent.
+- **Remaining problem, now cleanly characterized instead of noisy: with `pos_xy=0`
+  nothing corrects horizontal position error at all (only velocity is held near zero),
+  so the vehicle drifts away unboundedly (0->35m over 19s, accelerating in the back
+  half).** Re-enabling `pos_xy` (tried kp=1.0/kd=0.5, then a much gentler kp=0.15/kd=0)
+  reproducibly causes a violent tumble around t=4.3-5.1s regardless of gain magnitude -
+  see the comment on `pos_xy` in `run_sim.py`'s `GAINS` and "What's NOT resolved" below
+  for the full diagnostic detail. This is now understood to be a real resonance in the
+  velocity->attitude->rate cascade (confirmed via the EKF_ACCEL diagnostic showing a
+  smoothly growing/oscillating accel deviation before each tumble, not corrupted-sensor
+  garbage), not a bad pos_xy gain choice - the cascade doesn't yet have enough damping
+  margin to absorb ANY outer-loop position correction. `pos_xy` is back to 0 for now.
+
 ## Goal
 
 Custom Python EKF (`state estimation/FINAL_gps.py`) + custom Python PID cascade
@@ -348,24 +411,53 @@ This took many iterations to get reliable - follow it exactly.
     "best" configuration - the run-to-run noise is large enough that a single trial,
     good or bad, isn't strong evidence either way. Kept as-is since there's no better
     alternative yet, not because they're proven.
+15. **The run-to-run noise referenced throughout items #7-14 above (and used as the
+    reason several comparisons, like the att_rp kp=3-vs-6 test, were declared
+    inconclusive) had a real root cause: an unsynchronized busy-loop control loop
+    racing against asynchronous sensor delivery - see the 2026-09-27 session section at
+    the top of this file for the full diagnosis and fix (`GazeboBridge.wait_for_imu()`
+    + `MAX_DT` clamps in `gz_bridge.py`/`FINAL_gps.py`/`run_sim.py` and all three
+    `test_*_loop.py` harnesses).** Confirmed via actual dt measurements (loop rate
+    dropped from ~2000-3000Hz chaotic busy-spin to a consistent ~250-260Hz matching
+    Gazebo's real IMU rate) and via a genuinely new result: `run_sim.py`'s full cascade
+    survived a full 20s test with `pos_xy=0` (previous best was t=5.3s before an
+    unrecoverable yaw spike). This means every "inconclusive due to noise" comparison
+    earlier in this file (att_rp kp=3-vs-6, the ki addition to att_rp/att_yaw, the
+    kp=1.5-vs-6.0-with-identical-gains divergence-timing discrepancy) is worth
+    re-running now that trials should actually be comparable to each other - don't
+    assume any of those conclusions still hold, but don't assume they're wrong either,
+    they were just never measurable before.
 
 ## What's NOT resolved
 
-- **CURRENT blocker: full-cascade flight still diverges, but the failure point has
-  moved from t~1.85s to t~5.3s across this session's fixes (see items #11-14) - this
-  is now understood as a genuine damping/tuning gap, not a single bug.** The
-  `attitude_loop()` D-term was found completely dead (#11) and fixed, then needed
-  filtering (#12) and the D-term values themselves needed real tuning for the first
-  time ever (#14, since they'd never done anything before #11). A gyro sensor
-  corruption guard was also added (#13, mirroring the accel one). The best trial so
-  far (`att_rp` kd=1.5, `att_yaw` kd=0.3, `rate_yaw` kd=0.0) kept roll/pitch under ~9
-  degrees through t=5.3s before a sudden, violent yaw rate spike (14+ rad/s) that
-  didn't recover. What's been ruled out along the way:
-  - **Not EKF/sensor corruption** (for the original t~1.85s divergence) - `EKF_ACCEL`
-    diagnostic checked through that exact window, deviation stayed small (<0.04 m/s²).
-  - **Not simply "unbounded position drift" from `pos_xy=0`** - tried giving `pos_xy`
-    real gains (kp=1.0, kd=0.5): divergence happened *earlier*, not later. Reverted -
-    don't re-enable `pos_xy` on this reasoning without new evidence.
+- **CURRENT blocker (updated 2026-09-27, supersedes the paragraph below): with
+  `pos_xy=0`, the full cascade (velocity->attitude->rate) now flies genuinely stable -
+  survived a full 20s test, roll/pitch under ~6 degrees almost throughout, no tumble.
+  The blocker now is specifically that ANY nonzero `pos_xy` gain (tried kp=1.0/kd=0.5
+  AND a much gentler kp=0.15/kd=0.0) reproducibly excites a real resonance and tumbles
+  the vehicle around t=4.3-5.1s.** See the 2026-09-27 session section at the top of
+  this file and the comment on `pos_xy` in `run_sim.py`'s `GAINS` for full detail. Key
+  evidence: the `EKF_ACCEL` diagnostic shows a smoothly growing/oscillating accel
+  deviation (0.4->1.0+ m/s², cyclic over about a second) building right up to each
+  tumble - a real physical oscillation, not corrupted sensor data (compare to the
+  already-fixed corruption bug's signature: isolated 400+ m/s² single-tick spikes, not
+  a smooth build-up). Since this reproduces at TWO very different `pos_xy` magnitudes,
+  the problem is most likely insufficient damping margin somewhere in the inner
+  velocity/attitude/rate cascade (it can currently only just barely stay stable with
+  NO outer-loop disturbance at all), not the specific `pos_xy` gain chosen. Concretely
+  unexplored: whether the resonance is roll/pitch-dominated, yaw-dominated, or both
+  (the one tumble inspected closely had large rate spikes on both roll AND yaw -
+  20-30 rad/s each) - worth a closer look at which axis leads next time before
+  guessing at more gain changes.
+  - **Not EKF/sensor corruption** - confirmed twice now, both for the original
+    t~1.85s divergence (`EKF_ACCEL` deviation stayed small, <0.04 m/s², through that
+    window) and for the new pos_xy-triggered tumbles (deviation grows smoothly, not a
+    single-tick spike - see above).
+  - **`pos_xy` causing earlier divergence is real, not a timing-noise artifact** -
+    re-tested 2026-09-27 after fixing the actual root cause of the run-to-run noise
+    (see top of file); the result reproduced at a very different gain value, so this
+    is no longer just "one noisy trial." Don't re-attempt `pos_xy` at any gain without
+    first addressing whatever margin gap lets it destabilize the cascade.
   - **Not fixed by damping `rate_yaw`** - tried kd 0.0->5.0 on the one remaining
     undamped loop: made things clearly worse (diverged by t=2.0s, permanent lockup
     with `rate_meas` frozen at a stale value - see #13's caveat about the gyro guard
@@ -373,12 +465,17 @@ This took many iterations to get reliable - follow it exactly.
   - **Still open**: yaw is the axis that keeps failing last and worst across trials -
     worth focusing there specifically rather than continuing to adjust roll/pitch.
     Also still unchecked: `pos_z`'s behavior right as altitude crosses/approaches the
-    2m setpoint (kp=1.5, ki=0, kd=0.3, never revisited this session) - whether altitude
-    overshoots and how the resulting velocity reversal interacts with everything else;
-    and whether the current best-trial gains actually reproduce on a second run, given
-    this session's well-established run-to-run timing/sensor noise (see the
-    attitude-loop kp=3-vs-6 comparison elsewhere in this file for how large that noise
-    can be even with identical code).
+    2m setpoint (kp=1.5, ki=0, kd=0.3, never revisited) - the 20s pos_xy=0 test showed
+    real altitude oscillation (dipped to 0.05m off the ground once, recovered) worth
+    investigating on its own now that trials are actually trustworthy run-to-run.
+  - Original paragraph, now historical (predates the 2026-09-27 timing fix, kept for
+    context): full-cascade flight diverged, failure point moved from t~1.85s to
+    t~5.3s across items #11-14 (attitude D-term dead-code fix, filtering, gyro guard,
+    damping re-tuning). The best trial then (`att_rp` kd=1.5, `att_yaw` kd=0.3,
+    `rate_yaw` kd=0.0) kept roll/pitch under ~9 degrees through t=5.3s before a
+    sudden violent yaw rate spike. Those are still the current gains and still a
+    reasonable starting point, but "t=5.3s was the best ever achieved" is now stale -
+    pos_xy=0 alone gets a clean 20s with the same gains.
 - **`torque_range_rp`/`torque_range_yaw` loosening is no longer the obvious next
   experiment it was.** Yaw's fix was a `kp` increase (15->150) that works fine within
   the existing `±100` range without needing to loosen it - `tau_yaw` reached ~45 on a
@@ -423,6 +520,30 @@ This took many iterations to get reliable - follow it exactly.
   sensors - probably low priority.
 
 ## Recommended next steps (tune inside-out, one loop at a time)
+
+**Immediate next step as of 2026-09-27**: with the run-to-run noise fixed and
+`pos_xy=0`, `run_sim.py` is genuinely stable for 20s+ - the position-hold resonance
+(see "CURRENT blocker" above) is now the thing standing between here and real
+station-keeping flight. Before touching `pos_xy`'s gain again:
+1. Re-run the 20s `pos_xy=0` baseline once or twice more to confirm it's actually
+   reproducible now (trials should finally be comparable to each other) - don't
+   assume one clean 20s run is proof, same caution as everything else in this file.
+2. When a `pos_xy` trial tumbles, look closely at which axis leads the resonance
+   (roll, pitch, or yaw first) in the second or so of growing `EKF_ACCEL` deviation
+   before the tumble - the one tumble inspected so far had both roll and yaw
+   saturated simultaneously, not cleanly one axis, so this isn't confirmed yet.
+3. Once the leading axis is identified, that's the loop (`att_rp`/`att_yaw`/
+   `rate_rp`/`rate_yaw`) that most likely needs more damping margin - re-tune it in
+   isolation first (via its own `test_*_loop.py` harness) before re-enabling
+   `pos_xy`, rather than guessing at `pos_xy`'s own gain again (already tried two very
+   different values, both failed the same way - the problem isn't there).
+4. Now that trials are trustworthy, the previously-inconclusive `att_rp` kp=3.0-vs-6.0
+   comparison and the unconfirmed `ki` addition to `att_rp`/`att_yaw` (both noted
+   below as stale) are worth actually re-running before more new changes.
+
+The historical notes below (mostly 2026-09-26 and earlier) are still accurate as a
+record of what was tried, but "run_sim.py not flying yet" is now stale given the
+20s pos_xy=0 result - read them for the reasoning/gotchas, not as the current status.
 
 This is standard practice for cascaded flight controllers (matches how real FCs like
 Betaflight/PX4 are tuned in practice: rate/acro mode first, then angle mode, then

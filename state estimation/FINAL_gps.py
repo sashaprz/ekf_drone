@@ -30,6 +30,14 @@ k = 1 #how agressively to increase accel measurement noise when drone is acceler
 chi2_threshold = 11.34 #chi2 threshold for 3 DOF, 99% confidence interval - accel and mag corrections (3 DOF each)
 chi2_threshold_gps = 16.81 #chi2 threshold for 6 DOF, 99% confidence interval - GPS correction (position+velocity, 6 DOF)
 GRAVITY = 9.80665
+# 2026-09-27: defensive backstop, not the primary fix (see GazeboBridge.wait_for_imu()
+# for that) - caps a single predict step's dt so a genuine stall (WSL2/WSLg scheduling
+# hiccup, GC pause, gz-transport hiccup) can't dump an unbounded angle/velocity/position
+# integration step or blow up the covariance in one tick. 50ms is generous headroom
+# above any real per-sample interval this loop should see once paced by real IMU
+# arrival (Gazebo's IMU publishes far faster than that) - it should essentially never
+# bind in normal operation, only during an actual stall.
+MAX_DT = 0.05
 
 #---- ground truth (separate from the filter's own estimate) - a genuinely dynamic
 #trajectory instead of frozen constants. A live sensor reports whatever the vehicle is
@@ -438,6 +446,7 @@ class DroneEKF:
         #predict: integrate gyro into current angle estimation
         now = time.time()
         dt = now - self.last_time #sampling as fast as the hardware can handle
+        dt = min(dt, MAX_DT)  # clamp against a stalled tick - see MAX_DT's comment
 
         #using gyro to advance the attitude estimation forward by one timestep.
         #multiplying 2 unit quaternions

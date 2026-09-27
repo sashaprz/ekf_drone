@@ -41,6 +41,7 @@ def wait_for_liftoff(ekf, c, bridge, mix_fn, limits, takeoff_thrust,
     liftoff_start = time.time()
     last_t = liftoff_start
     while True:
+        bridge.wait_for_imu()  # paces to real sensor arrival, see GazeboBridge.wait_for_imu()
         state = ekf.step()
         now = time.time()
         dt = now - last_t

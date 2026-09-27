@@ -97,6 +97,7 @@ def main():
     last_t = time.time()
     warmup_start = last_t
     while time.time() - warmup_start < WARMUP_DURATION:
+        bridge.wait_for_imu()  # paces to real sensor arrival, see GazeboBridge.wait_for_imu()
         state = ekf.step()
         now = time.time()
         dt = now - last_t
@@ -118,6 +119,7 @@ def main():
     print("t       dt(ms)  sp      meas_vel(x,y,z)             thrust   alt(z)  roll_sp pitch_sp", flush=True)
 
     while True:
+        bridge.wait_for_imu()  # paces to real sensor arrival, see GazeboBridge.wait_for_imu()
         state = ekf.step()
         now = time.time()
         dt = now - last_t

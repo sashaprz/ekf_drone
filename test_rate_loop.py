@@ -89,6 +89,7 @@ def main():
     print("t       dt(ms)  sp      meas(r,p,y)                 tau(r,p,y)              alt(z)  vel(x,y)", flush=True)
 
     while True:
+        bridge.wait_for_imu()  # paces to real sensor arrival, see GazeboBridge.wait_for_imu()
         state = ekf.step()
 
         now = time.time()

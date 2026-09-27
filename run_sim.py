@@ -51,6 +51,23 @@ GAINS = {
     # feedback loop (oscillation), not a wrong-sign one (which saturates one-sided and
     # sits there). kp cut 2.0->0.8, kd raised 0.3->0.6 for more damping. NOT yet
     # confirmed stable - re-test before trusting these values.
+    # RE-TESTED 2026-09-27 at kp=1.0/kd=0.5, then kp=0.15/kd=0.0, after today's real
+    # timing-noise fix (see gz_bridge.py's wait_for_imu()) - confirmed the 2026-09-26
+    # revert wasn't a stale-noise artifact: BOTH gains caused a violent full tumble
+    # (kp=1.0 at t=4.35s, kp=0.15 at t=5.10s - tau saturated +/-100, rate spikes of
+    # 20-30 rad/s on multiple axes). The EKF_ACCEL diagnostic right before each tumble
+    # shows a real, smoothly growing/oscillating accel deviation (0.4->1.0+ m/s²,
+    # cyclic, not the 400+ m/s² single-tick garbage pattern from the already-fixed
+    # sensor-corruption bug) - a genuine resonance building over ~1s, not corrupted
+    # data. A pos_xy=0 run under the exact same fixed timing survived a full 20s with
+    # no tumble at all (just unbounded +X drift, the problem pos_xy is meant to fix).
+    # Conclusion: ANY nonzero pos_xy currently excites a real resonance/instability in
+    # the velocity->attitude->rate cascade, regardless of magnitude - this points at
+    # insufficient damping margin somewhere inside that cascade (attitude/rate loop
+    # tuning, most likely yaw per the existing "yaw fails last/worst" pattern - see
+    # HANDOFF.md), not at pos_xy's own gain value. Back to 0 until that margin is
+    # established; re-attempting pos_xy at ANY gain before then is expected to
+    # reproduce this same failure.
     "pos_xy": {"kp": 0.0, "ki": 0.0, "kd": 0.0},
     "pos_z":  {"kp": 1.5, "ki": 0.0, "kd": 0.3},
     "vel_xy": {"kp": 0.8, "ki": 0.2, "kd": 0.6, "integral_limits": (-5.0, 5.0)},
@@ -148,6 +165,11 @@ LIMITS = {
     "torque_range_yaw": (-100.0, 100.0),
 }
 
+# 2026-09-27: same defensive backstop as FINAL_gps.py's MAX_DT (see that comment) - now
+# that the main loop below waits on GazeboBridge.wait_for_imu() instead of busy-spinning,
+# this should essentially never bind, only during a genuine stall.
+MAX_DT = 0.05
+
 
 def quat_to_euler_deg(q):
     # [w,x,y,z] -> (roll,pitch,yaw) in degrees, ZYX convention, matches cascade.euler_to_quat
@@ -172,10 +194,11 @@ def main():
     i = 0
     print("running - Ctrl+C to stop", flush=True)
     while True:
+        bridge.wait_for_imu()  # paces the loop to real sensor arrival - see that method's comment
         state = ekf.step()
 
         now = time.time()
-        dt = now - last_t
+        dt = min(now - last_t, MAX_DT)
         last_t = now
 
         thrust, roll_tau, pitch_tau, yaw_tau = c.step(setpoint, state, dt)

@@ -1,4 +1,5 @@
 import math
+import threading
 import numpy as np
 
 from gz.transport13 import Node
@@ -22,6 +23,10 @@ class GazeboBridge:
     # return shapes exactly, so a DroneEKF can take these as its `sensors` instead
     def __init__(self):
         self._node = Node()
+
+        # set by _on_imu() (fires on gz-transport's own background thread), waited on by
+        # wait_for_imu() - see that method's comment for why this exists.
+        self._imu_event = threading.Event()
 
         self._gyro = (0.0, 0.0, 0.0)
         self._accel = (0.0, 0.0, 0.0)
@@ -72,6 +77,8 @@ class GazeboBridge:
         if math.sqrt(accel[0]**2 + accel[1]**2 + accel[2]**2) <= 6 * 9.80665:
             self._accel = accel
 
+        self._imu_event.set()
+
     def _on_mag(self, msg):
         v = np.array([msg.field_tesla.x, msg.field_tesla.y, msg.field_tesla.z])
         norm = np.linalg.norm(v)
@@ -91,6 +98,28 @@ class GazeboBridge:
         up = msg.altitude - self._home_alt
 
         self._gps = (north, east, up, msg.velocity_north, msg.velocity_east, msg.velocity_up)
+
+    def wait_for_imu(self, timeout=0.1):
+        # 2026-09-27: every control loop (run_sim.py, test_*_loop.py) used to call
+        # ekf.step() in a bare `while True` with no pacing at all - measured at up to
+        # ~3000Hz (dt~0.3ms), while Gazebo's real IMU topic publishes far slower. Most
+        # iterations were re-processing the exact same cached sensor reading with
+        # whatever tiny, OS-scheduling-dependent dt the busy loop happened to have at
+        # that instant, and the moment a genuinely new reading landed (delivered
+        # asynchronously by gz-transport's own thread) was a race against the main
+        # loop's own timing - non-deterministic by construction, and a good fit for
+        # this project's long-documented "run-to-run noise" (identical gains,
+        # identical code, wildly different divergence times) and the intermittent
+        # single-tick sensor "corruption" events: a real sensor jump divided by
+        # whatever near-random dt the loop happened to have produces an
+        # effectively-random-magnitude derivative kick. Blocking here ties the loop's
+        # rate to real IMU arrival instead - dt then reflects actual sensor timing,
+        # not scheduler noise. `timeout` is just a safety net against a stalled topic
+        # (e.g. Gazebo not running yet) - the loop still proceeds so a hang here can't
+        # wedge the vehicle with stale motor commands.
+        got_new = self._imu_event.wait(timeout)
+        self._imu_event.clear()
+        return got_new
 
     def get_gyro(self):
         return self._gyro
