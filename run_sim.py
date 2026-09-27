@@ -125,6 +125,15 @@ GAINS = {
     # whole time) - not a slow response, no response. kp raised ~10x to compensate for the
     # weaker physical gain, not because the loop was oscillating (start of tuning from
     # scratch for this axis, not a refinement of a working baseline).
+    # kd=5.0 TRIED and REVERTED, 2026-09-26 - made things clearly worse: diverged by
+    # t=2.0s (vs ~5.3s for the best trial so far, att_yaw kd=0.3 with this at kd=0.0),
+    # and never recovered - rate_meas froze at a constant nonsense value for the rest
+    # of a 45s run, almost certainly gz_bridge.py's gyro sanity clamp correctly
+    # rejecting a vehicle spinning fast enough to permanently exceed 50 rad/s, holding
+    # stale data forever once the tumble became real. Back to kd=0.0 - this loop's
+    # damping is not the fix, at least not at this magnitude. The best full-cascade
+    # result so far used this exact set of gains (rate_yaw kd=0.0, att_rp kd=1.5,
+    # att_yaw kd=0.3) - don't re-try kd>0 here without a specific new reason to.
     "rate_yaw": {"kp": 150.0, "ki": 2.0, "kd": 0.0, "integral_limits": (-100.0, 100.0), "d_filter_alpha": 0.2},
 }
 LIMITS = {

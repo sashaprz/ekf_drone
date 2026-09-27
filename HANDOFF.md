@@ -24,15 +24,37 @@ horizontal drift *worse*, not better). With all of that fixed, a `vz` step test 
 shows `vx`/`vy` staying bounded and settling instead of diverging - the first time any
 loop above rate has stayed stable for a full multi-second test.
 
-**Full-cascade flight WAS re-tested (2026-09-26, after all the above fixes) - real
-progress, new open problem.** `run_sim.py` now climbs cleanly to ~1.8m (matches the
-2m setpoint reasonably) before a new divergence starts around t~1.85-1.90s - pitch
-jumps from ~1 degree to -9.8 degrees and grows smoothly from there into a full tumble
-by t~4s. This is genuinely new territory: every prior full-cascade result (including
-the old 71s-runaway/yaw-spin diagnosis) predates discovering the vehicle usually
-wasn't even airborne, so none of that old diagnosis applies here. **Root cause not yet
-found** - see "What's NOT resolved" for what's been ruled out and what's still open.
-This is the current blocker on an actual full flight - see "Recommended next steps".
+**Full-cascade flight WAS re-tested extensively (2026-09-26, after all the above
+fixes) - real, measurable progress, still not flying.** `run_sim.py` climbs cleanly to
+~1.8-2m every time now. The remaining problem is a divergence that happens later and
+later as more real bugs get fixed, but hasn't been eliminated yet:
+- Original post-velocity-fixes state: diverged ~t=1.85-1.90s.
+- After finding and fixing a genuinely dead D-term in `attitude_loop()` (see fix #11) -
+  still diverged, similar timing.
+- After filtering that D-term + adding a gyro sensor sanity clamp (fixes #12/#13) -
+  still diverged, similar timing, but roll/pitch stayed under ~5-9 degrees noticeably
+  longer in some trials.
+- After raising `att_rp`/`att_yaw`'s `kd` (fix #14) - **best result so far**: roll/pitch
+  stayed under ~9 degrees through t=5.3s (nearly 3x longer than the original), before a
+  sudden, violent yaw rate spike (14+ rad/s) that the vehicle never recovered from.
+- Tried adding `kd` to `rate_yaw` (the one remaining completely undamped loop) - made
+  things clearly *worse* (diverged by t=2.0s, permanent lockup). Reverted.
+- **Re-ran the exact same gains (`att_rp` kd=1.5, `att_yaw` kd=0.3, `rate_yaw` kd=0.0)
+  as a confirmation - diverged MUCH earlier this time (full tumble by t~2.9s, vs
+  t=5.3s for the first trial with identical code).** This is clean, direct proof that
+  the run-to-run noise already documented elsewhere in this file (see the attitude-loop
+  kp=3-vs-6 comparison) is real, large, and affects the full cascade just as much as
+  the isolated-loop tests - single full-cascade trials are NOT reliable evidence for
+  judging a gain change here. The current gains are a reasonable, well-reasoned
+  starting point (each individual change was independently justified), not a confirmed
+  "best" configuration - don't treat the t=5.3s trial as proof they're better than
+  what came before, and don't be discouraged by the t=2.9s trial either.
+
+This is no longer "root cause unknown" - it's now understood to be a genuine tuning
+gap (insufficient damping somewhere in the outer loops, most likely still yaw-related
+given the failure signature), being closed incrementally, not a single bug. See
+"What's confirmed fixed" #11-14 and "What's NOT resolved" for the full detail and
+"Recommended next steps" for where to pick this up.
 
 ## How the user likes to work
 
@@ -272,40 +294,91 @@ This took many iterations to get reliable - follow it exactly.
     loop, not a wrong-signed one. Also re-tuned `vel_xy`: `kp` 2.0->0.8, `kd` 0.3->0.6.
     Confirmed fixed together: `vx`/`vy` now stay bounded and settle over a full 3s test
     instead of diverging - first time any loop above rate has stayed stable that long.
+11. **`attitude_loop()`'s derivative term was completely dead, structurally, since the
+    loop was written - not just untuned, literally incapable of contributing anything
+    no matter what `kd` was set to.** It called `PID.update(setpoint=err_roll,
+    measurement=0.0, dt)` - `measurement` hardcoded to the literal constant `0.0`.
+    `pid.py`'s derivative-on-measurement computes `raw_derivative = -(measurement -
+    last_measurement)/dt`; with `measurement` always `0.0`, `last_measurement` becomes
+    `0.0` after the first call and stays there forever, so `raw_derivative` is exactly
+    `0.0` on every call, always. Confirmed by direct code inspection (not
+    speculation), and confirmed as the ONE anomalous loop - `rate_loop`/
+    `velocity_loop`/`position_loop` all pass their real, continuously-changing
+    `state[...]` value as `measurement` and their D-terms work correctly. **Fix**:
+    `self.att_pid_x.update(0.0, -err_roll, dt)` (same for pitch/yaw) - `error = 0 -
+    (-err_roll) = err_roll`, identical P/I math, but `measurement=-err_roll` now
+    genuinely evolves, so `kd` finally damps how fast the attitude error is changing.
+12. **Immediately after fix #11, `att_rp`/`att_yaw` needed the same D-term noise filter
+    `rate_rp`/`rate_yaw` already have and they didn't.** First post-fix `run_sim.py`
+    trial hit `tau=(100,100,100)` (full 3-axis saturation) and `rate_sp` pinned at its
+    3.0 rad/s cap on two axes, from a modest ~4-6 degree tilt state - a derivative
+    kick from differentiating a real but EKF-noisy error signal with zero filtering,
+    not a real disturbance response. **Fix**: added `d_filter_alpha: 0.2` to both
+    (matches `rate_rp`/`rate_yaw`'s existing value and its own stated rationale).
+13. **`gz_bridge.py`'s gyro channel was the one sensor field with no corruption
+    guard**, even though the accel channel on the exact same IMU message already had
+    one (fix #7). `FINAL_gps.py`'s `state['rate']` is a straight, ungated passthrough
+    of the raw gyro reading (unlike accel, which goes through the chi-squared gate),
+    so a single corrupted gyro reading hits the rate loop completely unprotected.
+    Confirmed via a full `run_sim.py` log: `rate_meas` jumped from ~0 to
+    `(-9.84,-22.36,-3.29)` rad/s in one tick, immediately saturating all 3 torque
+    channels, right at a divergence onset. **Fix**: same pattern as the accel guard -
+    reject any gyro reading with magnitude over 50 rad/s (far beyond anything this
+    vehicle's real torque authority produces in one ~200Hz tick, far below what's
+    needed to reject genuinely fast real rotation) and hold the last good value.
+    **Caveat discovered later**: once a vehicle is ACTUALLY tumbling with sustained
+    real rates over 50 rad/s, this same guard will permanently reject all further
+    readings and freeze `state['rate']` at a stale value forever, which looks
+    identical to a dead sensor from the logs - seen in the rate_yaw kd=5.0 trial
+    below. Not a bug in the guard itself (50 rad/s is still a reasonable real-vs-
+    corrupted threshold), just a reminder that a frozen `rate_meas` late in an
+    already-diverging run means "it's spinning too fast to read," not "gyro broke."
+14. **`att_rp`/`att_yaw`'s `kd` values (0.5/0.05) had literally never been tested at a
+    working, non-zero effective value before fix #11** - they were numbers sitting in
+    `GAINS` that happened to do nothing. First real tuning pass, 2026-09-26:
+    `att_rp` kd 0.5->1.5 improved things substantially (roll/pitch stayed under ~9
+    degrees through t=5.3s, vs ~2s before). `att_yaw` kd 0.05->0.3 (matching `att_rp`'s
+    new kp:kd ratio, since `att_yaw`'s was proportionally much weaker) - result
+    unclear on its own since it was tested together with the `att_rp` change. Trying
+    to also damp `rate_yaw` (kd 0.0->5.0, the last remaining undamped loop) made
+    things clearly worse (see #13's caveat) and was reverted. **Re-ran the exact same
+    gains as a confirmation check - diverged much earlier (t~2.9s vs t=5.3s) with
+    literally identical code.** These gains are a reasonable, well-reasoned starting
+    point (each change individually justified against real symptoms), not a confirmed
+    "best" configuration - the run-to-run noise is large enough that a single trial,
+    good or bad, isn't strong evidence either way. Kept as-is since there's no better
+    alternative yet, not because they're proven.
 
 ## What's NOT resolved
 
-- **NEW, current blocker: full-cascade flight diverges around t~1.85-1.90s, root cause
-  not yet found (2026-09-26).** `run_sim.py` climbs cleanly to ~1.8m (setpoint is 2m),
-  then pitch jumps from ~1 degree to -9.8 degrees in about 0.1s and grows smoothly from
-  there (not a discontinuous jump like the old EKF corruption bugs - genuinely
-  continuous, physically consistent growth in both the angle and its rate) into a full
-  tumble by t~4s. What's been ruled out:
-  - **Not EKF/sensor corruption** - checked `EKF_ACCEL` diagnostic through the exact
-    divergence window, deviation stayed small and unremarkable (<0.04 m/s² the whole
-    time, no spike). Both of this session's EKF fixes (items #7/#8) are confirmed
-    working correctly here.
-  - **Not simply "unbounded position drift"** - the leading theory when this was found
-    was that `pos_xy` being zeroed let velocity residuals integrate into unbounded
-    position drift, eventually overwhelming `vel_xy`. Tried giving `pos_xy` real gains
-    (kp=1.0, kd=0.5) as a direct test of this theory: divergence happened *earlier*
-    (~t=1.92s vs ~1.85-1.90s), not later or avoided. Reverted - don't re-enable
-    `pos_xy` based on this same reasoning without new evidence.
-  - Correlated against position at the original (pos_xy=0) divergence: `pos.x`'s growth
-    rate roughly tripled (0.45->1.3 m/s) at the same moment pitch started jumping - so
-    *something* about growing horizontal velocity/motion is involved, just not fixed by
-    the "add outer-loop damping" theory tried so far.
-  - Suspects not yet checked: (1) the attitude loop's small-angle quaternion-error
-    approximation (`attitude_loop()`'s `q_err[1:]` used directly as if it were an Euler
-    angle vector) breaking down once real tilt grows past a few degrees - this test is
-    the first time any validated-in-isolation test has let tilt grow this far under
-    real closed-loop dynamics; (2) some interaction specific to running
-    position->velocity->attitude->rate at their real intended sub-rates (30/75/200Hz)
-    that doesn't show up in the simplified test harnesses, which each only exercise
-    2-3 of the 4 loops at once; (3) `pos_z`'s behavior right as altitude crosses/
-    approaches the 2m setpoint (kp=1.5, ki=0, kd=0.3, never revisited this session) -
-    worth checking whether altitude actually overshoots and how the resulting velocity
-    reversal interacts with everything else, independent of the horizontal-axis theory.
+- **CURRENT blocker: full-cascade flight still diverges, but the failure point has
+  moved from t~1.85s to t~5.3s across this session's fixes (see items #11-14) - this
+  is now understood as a genuine damping/tuning gap, not a single bug.** The
+  `attitude_loop()` D-term was found completely dead (#11) and fixed, then needed
+  filtering (#12) and the D-term values themselves needed real tuning for the first
+  time ever (#14, since they'd never done anything before #11). A gyro sensor
+  corruption guard was also added (#13, mirroring the accel one). The best trial so
+  far (`att_rp` kd=1.5, `att_yaw` kd=0.3, `rate_yaw` kd=0.0) kept roll/pitch under ~9
+  degrees through t=5.3s before a sudden, violent yaw rate spike (14+ rad/s) that
+  didn't recover. What's been ruled out along the way:
+  - **Not EKF/sensor corruption** (for the original t~1.85s divergence) - `EKF_ACCEL`
+    diagnostic checked through that exact window, deviation stayed small (<0.04 m/s²).
+  - **Not simply "unbounded position drift" from `pos_xy=0`** - tried giving `pos_xy`
+    real gains (kp=1.0, kd=0.5): divergence happened *earlier*, not later. Reverted -
+    don't re-enable `pos_xy` on this reasoning without new evidence.
+  - **Not fixed by damping `rate_yaw`** - tried kd 0.0->5.0 on the one remaining
+    undamped loop: made things clearly worse (diverged by t=2.0s, permanent lockup
+    with `rate_meas` frozen at a stale value - see #13's caveat about the gyro guard
+    behaving that way once a tumble becomes genuinely fast). Reverted to kd=0.0.
+  - **Still open**: yaw is the axis that keeps failing last and worst across trials -
+    worth focusing there specifically rather than continuing to adjust roll/pitch.
+    Also still unchecked: `pos_z`'s behavior right as altitude crosses/approaches the
+    2m setpoint (kp=1.5, ki=0, kd=0.3, never revisited this session) - whether altitude
+    overshoots and how the resulting velocity reversal interacts with everything else;
+    and whether the current best-trial gains actually reproduce on a second run, given
+    this session's well-established run-to-run timing/sensor noise (see the
+    attitude-loop kp=3-vs-6 comparison elsewhere in this file for how large that noise
+    can be even with identical code).
 - **`torque_range_rp`/`torque_range_yaw` loosening is no longer the obvious next
   experiment it was.** Yaw's fix was a `kp` increase (15->150) that works fine within
   the existing `±100` range without needing to loosen it - `tau_yaw` reached ~45 on a
@@ -408,32 +481,40 @@ saturating. Not yet tested: `vx`/`vy` as the STEPPED axis (only tested them as t
 `vel_xy`'s retuned gains (kp=0.8/ki=0.2/kd=0.6, itself not yet independently verified
 against a real step, only against arresting drift).
 
-**`run_sim.py` tried for real, 2026-09-26 - climbs cleanly, then diverges at t~1.85-
-1.90s.** See "What's NOT resolved" above for the full writeup of what's been ruled out
-(not EKF corruption, not fixed by enabling `pos_xy`). This is the current blocker.
+**`run_sim.py` tried for real, extensively, 2026-09-26 - climbs cleanly every time,
+divergence point pushed from t~1.85s to t~5.3s across a chain of real fixes (D-term
+dead code, D-term filtering, gyro guard, damping re-tuning - see items #11-14). Not
+flying yet, but this is now iterative tuning territory, not bug-hunting.**
 
-1. **Chase the full-cascade divergence next** - it's the actual gate on "does it fly."
-   Concrete next moves, roughly in order of how cheap they are to check:
-   - Add `pos.z` and a horizontal-speed readout to `run_sim.py`'s own print (it already
-     prints `pos=(x,y,z)` every 30 iterations - just eyeball whether altitude
-     overshoots past 2m right around t~1.8s, since `pos_z` has no integral and was
-     never revisited this session).
-   - Build `test_position_loop.py` (same pattern as the others, one loop further out -
-     position_loop -> velocity_loop -> attitude_loop -> rate_loop) to isolate whether
-     this is a position-loop-specific interaction or something that only shows up
-     with all 4 loops running at their real relative sub-rates together.
-   - If tilt really is the trigger, check whether `attitude_loop()`'s small-angle
-     `q_err[1:]` approximation is still valid at the tilt angles involved (a few
-     degrees should be fine; whatever `pitch` is right before the jump is the number
-     to check against).
-2. **Standard per-axis tuning heuristic** (still applies once the cause is found):
-   raise `kp` until you see sustained oscillation in the log, back off to ~50-70% of
-   that value, add `kd` to damp remaining overshoot, add a small `ki` last only if
-   there's steady-state error that `kp`+`kd` alone don't close. Edit gains in
-   `run_sim.py`'s `GAINS` dict (both scripts import from there). Don't trust a single
-   trial's result for any change - real-time sensor/timing jitter under WSL means
-   single trials carry real noise; average/range over a few before concluding a gain
-   change helped or hurt.
+1. **Continue iterative full-cascade tuning, focused on yaw** - it's been the axis
+   that fails last and worst in the most recent trials (a sudden, violent rate spike
+   after roll/pitch have already been held stable for several seconds). Concrete next
+   moves, roughly in order of how cheap they are to check:
+   - **First, just re-run the current gains** (`att_rp` kd=1.5, `att_yaw` kd=0.3,
+     `rate_yaw` kd=0.0) once or twice more before changing anything else - the best
+     result so far is a single trial, and this session's own data (the attitude-loop
+     kp=3-vs-6 comparison) shows single trials aren't reliable evidence on their own.
+   - If it reproduces, look specifically at what's happening to yaw (`rate_sp`/`tau`
+     on the 3rd axis, and `pos.x`/`pos.y` growth) in the ~1s before the spike, the
+     same way the roll/pitch divergence was diagnosed earlier - `run_sim.py`'s own
+     print already has everything needed, just needs reading closely around that
+     specific window.
+   - `att_yaw`'s `kp=1.5` has never been revisited (only `kd` was touched this
+     session) - worth considering whether it's simply too weak relative to how hard
+     `rate_yaw`'s own `kp=150` can react once attitude error builds up.
+   - Add `pos.z` overshoot-checking and a horizontal-speed readout to `run_sim.py`'s
+     print if the position loop still looks implicated once yaw is better understood.
+   - Build `test_position_loop.py` (same pattern as the others, one loop further out)
+     if isolating position specifically still seems necessary - not yet built.
+2. **Standard per-axis tuning heuristic** (still applies): raise `kp` until you see
+   sustained oscillation in the log, back off to ~50-70% of that value, add `kd` to
+   damp remaining overshoot, add a small `ki` last only if there's steady-state error
+   that `kp`+`kd` alone don't close. Edit gains in `run_sim.py`'s `GAINS` dict (both
+   scripts import from there). Don't trust a single trial's result for any change -
+   this session has repeatedly confirmed real run-to-run noise; average/range over a
+   few before concluding a gain change helped or hurt, and revert immediately (like
+   the `rate_yaw` kd=5.0 attempt) the moment a change looks clearly worse rather than
+   pushing further on it.
 3. Not yet tested: `test_velocity_loop.py` with `vx`/`vy` as the STEPPED axis (only
    tested as "should stay at 0" background axes so far) - worth doing before fully
    trusting `vel_xy`'s retuned gains against a real step, not just against arresting
