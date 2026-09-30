@@ -5,11 +5,20 @@ the recorded timestamps, and reports estimate-vs-truth error. Lets EKF changes b
 checked in seconds instead of one Gazebo crash per try.
 
 usage: python testing/replay_ekf.py sensors_oracle1.csv [print_every]
+
+If <csv>.cal.csv exists (run_sim.py writes it since 2026-09-30 evening) calibration is
+fed the live calibration's own samples; otherwise (or with CAL_ROW0=1) row 0 repeated.
+
+The replay core (load_rows / Replay / run_replay) is also imported by testing/suite/
+run_suite.py, so the stress-test suite and this tool drive the EKF identically.
 """
 import sys
 import os
 import math
 import csv
+import types
+import contextlib
+import io
 import numpy as np
 
 # lives in testing/ - repo root is one level up (for run_sim.py, "state estimation/", "PID/")
@@ -41,26 +50,56 @@ def quat_err_deg(q_est, q_true):
     return np.degrees(2 * e[1:])
 
 
+def load_rows(path):
+    with open(path) as f:
+        return [{k: float(v) for k, v in r.items()} for r in csv.DictReader(f)]
+
+
+def load_cal(csv_path):
+    """The calibration samples run_sim.py saved next to a SENSOR_LOG (<csv>.cal.csv), as
+    {"gyro": [...], "mag": [...], "accel": [...]} - or None for recordings made before
+    2026-09-30 evening, which then calibrate on row 0 repeated (the old behaviour)."""
+    path = csv_path + ".cal.csv"
+    if not os.path.exists(path) or os.environ.get("CAL_ROW0") == "1":
+        return None
+    rows = load_rows(path)
+    return {"gyro": [(r["gx"], r["gy"], r["gz"]) for r in rows],
+            "mag": [(r["mx"], r["my"], r["mz"]) for r in rows],
+            "accel": [(r["ax"], r["ay"], r["az"]) for r in rows]}
+
+
 class Replay:
     mag_reference = MAG_REFERENCE_ENU
 
-    def __init__(self, rows):
+    def __init__(self, rows, remapped=None, cal=None):
         self.rows = rows
         self.i = 0
         self.calibrating = True
-        self.remapped = os.environ.get("MAG_REMAPPED", "1") == "1"
+        self.remapped = os.environ.get("MAG_REMAPPED", "1") == "1" if remapped is None else remapped
+        self.cal = cal
+        self._ci = {"gyro": 0, "mag": 0, "accel": 0}
+
+    def _cal_read(self, name):
+        # replay the live calibration's reads in order (same call sequence as calibrate())
+        seq = self.cal[name]
+        v = seq[min(self._ci[name], len(seq) - 1)]
+        self._ci[name] += 1
+        return v
 
     def _row(self):
         # calibration reads before any timestamps matter - serve the first (at-rest) row
         return self.rows[0] if self.calibrating else self.rows[self.i]
 
     def get_gyro(self):
+        if self.calibrating and self.cal: return self._cal_read("gyro")
         r = self._row(); return (r["gx"], r["gy"], r["gz"])
 
     def get_accel(self):
+        if self.calibrating and self.cal: return self._cal_read("accel")
         r = self._row(); return (r["ax"], r["ay"], r["az"])
 
     def get_mag(self):
+        if self.calibrating and self.cal: return self._cal_read("mag")
         # csvs recorded before the 2026-09-30 mag fix hold the (wrong) remapped (-y, x, -z)
         # value - undo it to get the raw reading the bridge now passes through
         r = self._row()
@@ -69,22 +108,52 @@ class Replay:
         return (r["mx"], r["my"], r["mz"])
 
     def get_gps(self):
-        r = self._row(); return (r["px"], r["py"], r["pz"], r["vx"], r["vy"], r["vz"])
+        # optional "gps_ok" column (testing/suite/faults.py): 0 = receiver has no fix
+        r = self._row()
+        if r.get("gps_ok", 1.0) == 0.0:
+            return None
+        return (r["px"], r["py"], r["pz"], r["vx"], r["vy"], r["vz"])
 
 
-def main():
-    path = sys.argv[1]
-    every = int(sys.argv[2]) if len(sys.argv) > 2 else 250
-    with open(path) as f:
-        rows = [{k: float(v) for k, v in r.items()} for r in csv.DictReader(f)]
+class ArrayReplay(Replay):
+    """Same sensor interface as Replay, backed by columns (name -> python list) instead of
+    a list of row dicts - much lighter for long recordings (testing/suite)."""
 
-    src = Replay(rows)
-    clock = {"t": rows[0]["t"]}
-    FINAL_gps.time.time = lambda: clock["t"]
-    ekf = FINAL_gps.DroneEKF(sensors=src)
-    src.calibrating = False
+    def __init__(self, cols, remapped=None, cal=None):
+        super().__init__(None, remapped, cal)
+        c = cols
+        self._g = list(zip(c["gx"], c["gy"], c["gz"]))
+        self._a = list(zip(c["ax"], c["ay"], c["az"]))
+        m = (c["my"], [-v for v in c["mx"]], [-v for v in c["mz"]]) if self.remapped else (c["mx"], c["my"], c["mz"])
+        self._m = list(zip(*m))
+        self._p = list(zip(c["px"], c["py"], c["pz"], c["vx"], c["vy"], c["vz"]))
+        self._ok = c.get("gps_ok")
+
+    def _k(self):
+        return 0 if self.calibrating else self.i
+
+    def get_gyro(self):
+        if self.calibrating and self.cal: return self._cal_read("gyro")
+        return self._g[self._k()]
+
+    def get_accel(self):
+        if self.calibrating and self.cal: return self._cal_read("accel")
+        return self._a[self._k()]
+
+    def get_mag(self):
+        if self.calibrating and self.cal: return self._cal_read("mag")
+        return self._m[self._k()]
+
+    def get_gps(self):
+        k = self._k()
+        if self._ok is not None and self._ok[k] == 0.0:
+            return None
+        return self._p[k]
+
+
+def apply_exp(ekf, exp):
     # experiment knobs: EXP="R_ACC=1e6 QAB=1e-10 QATT=1e-7"
-    for kv in os.environ.get("EXP", "").split():
+    for kv in exp.split():
         k, v = kv.split("="); v = float(v)
         if k == "R_ACC": ekf.R_accel_base = np.eye(3) * v
         if k == "QAB": ekf.Q[12:15, 12:15] = np.eye(3) * v
@@ -103,15 +172,46 @@ def main():
             ekf.q = FINAL_gps.quat_mult(ekf.q, np.array([1.0, *d])); ekf.q /= np.linalg.norm(ekf.q)
             ekf.P[0:3, 0:3] += np.eye(3) * math.radians(abs(v)) ** 2
 
+
+def run_replay(src, times, on_step, exp="", t_end=None, quiet=False):
+    """Calibrate a DroneEKF on sample 0 (src.calibrating=True serves it), then step it
+    through every sample with the EKF's clock set to times[i]. on_step(i, ekf, state) is
+    called after each step. Only FINAL_gps's own `time` reference is patched (not the
+    global time module). quiet=True swallows the EKF's prints (EKF_GPS_RESET - counted
+    in ekf.stats anyway). Returns the ekf."""
+    clock = {"t": times[0]}
+    saved_time = FINAL_gps.time
+    FINAL_gps.time = types.SimpleNamespace(time=lambda: clock["t"])
+    out = io.StringIO() if quiet else sys.stdout
+    try:
+        with contextlib.redirect_stdout(out):
+            src.calibrating = True
+            src._ci = {"gyro": 0, "mag": 0, "accel": 0}
+            ekf = FINAL_gps.DroneEKF(sensors=src)
+            src.calibrating = False
+            apply_exp(ekf, exp)
+            t0 = times[0]
+            for i, t in enumerate(times):
+                if t_end is not None and t - t0 > t_end:
+                    break
+                src.i = i
+                clock["t"] = t
+                st = ekf.step()
+                on_step(i, ekf, st)
+    finally:
+        FINAL_gps.time = saved_time
+    return ekf
+
+
+def main():
+    path = sys.argv[1]
+    every = int(sys.argv[2]) if len(sys.argv) > 2 else 250
+    rows = load_rows(path)
     t0 = rows[0]["t"]
     att_err, pos_err = [], []
-    t_end = float(os.environ.get("T_END", "1e9"))
-    for i, r in enumerate(rows):
-        if r["t"] - rows[0]["t"] > t_end:
-            break
-        src.i = i
-        clock["t"] = r["t"]
-        st = ekf.step()
+
+    def on_step(i, ekf, st):
+        r = rows[i]
         tq = (r["tqw"], r["tqx"], r["tqy"], r["tqz"])
         tp = np.array([r["tpx"], r["tpy"], r["tpz"]])
         ae = quat_err_deg(st["quat"], tq)
@@ -123,6 +223,9 @@ def main():
                   f"true=({tr[0]:6.1f},{tr[1]:6.1f},{tr[2]:6.1f}) att_err=({ae[0]:5.1f},{ae[1]:5.1f},{ae[2]:5.1f}) "
                   f"pos_err=({pe[0]:5.2f},{pe[1]:5.2f},{pe[2]:6.2f}) "
                   f"abias=({ekf.accel_bias_x:+.3f},{ekf.accel_bias_y:+.3f},{ekf.accel_bias_z:+.3f})")
+
+    run_replay(Replay(rows, cal=load_cal(path)), [r["t"] for r in rows], on_step,
+               exp=os.environ.get("EXP", ""), t_end=float(os.environ.get("T_END", "1e9")))
     att_err = np.abs(np.array(att_err)); pos_err = np.abs(np.array(pos_err))
     print(f"att_err deg  rms={np.sqrt((att_err**2).mean(0)).round(2)} max={att_err.max(0).round(1)}")
     print(f"pos_err m    rms={np.sqrt((pos_err**2).mean(0)).round(2)} max={pos_err.max(0).round(2)}")

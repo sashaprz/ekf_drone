@@ -435,6 +435,11 @@ class DroneEKF:
         self.last_time = time.time()
         self.last_gps_time = time.time()
         self.gps_rejections = 0
+        # read-only instrumentation for testing/suite (EKF_TEST_PLAN.md s1 exception 1):
+        # counters + the last gate distances. Nothing in the filter reads these.
+        self.stats = {"gps_updates": 0, "gps_rejected": 0, "gps_resets": 0, "gps_no_fix": 0,
+                      "accel_updates": 0, "accel_rejected": 0, "mag_updates": 0, "mag_rejected": 0}
+        self.last_d2 = {"gps": None, "accel": None, "mag": None}
 
     def apply_correction(self, correction):
         #injects one measurement's correction immediately and re-normalizes q, instead of
@@ -535,9 +540,16 @@ class DroneEKF:
         #frozen q and injecting once at the end - see apply_correction's comment for why.
 
         #gated bc gps sample rate is lower than accel/mag/gyro
-        if now - self.last_gps_time >= gps_period:
+        # get_gps() may return None = "no fix" (EKF_TEST_PLAN.md s1 exception 2): skip the
+        # update and leave last_gps_time alone, so the next tick polls again. Unchanged
+        # whenever a fix is present.
+        gps_due = now - self.last_gps_time >= gps_period
+        gps_fix = self._get_gps() if gps_due else None
+        if gps_due and gps_fix is None:
+            self.stats["gps_no_fix"] += 1
+        if gps_fix is not None:
             #get gps data
-            gps_x, gps_y, gps_z, gps_vx, gps_vy, gps_vz = self._get_gps()  # world frame (ENU for gz_bridge)
+            gps_x, gps_y, gps_z, gps_vx, gps_vy, gps_vz = gps_fix  # world frame (ENU for gz_bridge)
             gps_measurement = np.array([gps_x, gps_y, gps_z, gps_vx, gps_vy, gps_vz]) #current GPS position + velocity, compared against predicted position/velocity in the gps correction step
 
             #gps correction
@@ -549,6 +561,7 @@ class DroneEKF:
             #gate against a bad fix (multipath, momentary bad geometry) - R_gps isn't
             #adaptively inflated like R_accel, so no separate "base" R is needed here
             d_squared_gps = residual_gps.T @ np.linalg.inv(S_gps) @ residual_gps
+            self.last_d2["gps"] = float(d_squared_gps)
 
             #to catch unreasonable measurements and not let them corrupt the state.
             # lockout recovery, 2026-09-30: once one hard event (e.g. a ground touch)
@@ -559,7 +572,9 @@ class DroneEKF:
             # pos/vel to the fix and re-open their covariance (PX4's EKF2 does the same).
             if d_squared_gps > chi2_threshold_gps:
                 self.gps_rejections += 1
+                self.stats["gps_rejected"] += 1
                 if self.gps_rejections >= GPS_LOCKOUT_RESETS:
+                    self.stats["gps_resets"] += 1
                     print(f"EKF_GPS_RESET t={now:.3f} after {self.gps_rejections} rejections "
                           f"d2={d_squared_gps:.1f} pos_err={residual_gps[0:3].round(2)}", flush=True)
                     self.position = gps_measurement[0:3].copy()
@@ -572,6 +587,7 @@ class DroneEKF:
                 self.gps_rejections = 0
 
             if d_squared_gps <= chi2_threshold_gps:
+                self.stats["gps_updates"] += 1
                 self.apply_correction(K_gps @ residual_gps)
                 #Joseph form - numerically robust to floating-point drift (keeps P symmetric/PSD),
                 #vs the algebraically-equivalent but fragile (I-KH)@P
@@ -593,6 +609,9 @@ class DroneEKF:
         #(d_squared asymptotes to ~1/k for large outliers regardless of severity)
         S_accel_gate = self.H_accel @ self.P @ self.H_accel.T + self.R_accel_base
         d_squared = residual_accel.T @ np.linalg.inv(S_accel_gate) @ residual_accel
+        self.last_d2["accel"] = float(d_squared)
+        if self.use_accel_correction:
+            self.stats["accel_updates" if d_squared <= chi2_threshold else "accel_rejected"] += 1
 
         if d_squared <= chi2_threshold and self.use_accel_correction:
           self.apply_correction(K_accel @ residual_accel)
@@ -612,6 +631,8 @@ class DroneEKF:
         #gate against magnetic interference (motors/ESCs) - R_mag is static, not
         #adaptively inflated like R_accel, so no separate "base" R is needed here
         d_squared_mag = residual_mag.T @ np.linalg.inv(S_mag) @ residual_mag
+        self.last_d2["mag"] = float(d_squared_mag)
+        self.stats["mag_updates" if d_squared_mag <= chi2_threshold else "mag_rejected"] += 1
 
         if d_squared_mag <= chi2_threshold:
             self.apply_correction(K_mag @ residual_mag)

@@ -1,5 +1,38 @@
 # Handoff: PID cascade tuning against Gazebo/x500
 
+## 2026-09-30 evening: EKF stress-test suite built, baseline recorded (EKF_TEST_PLAN.md)
+
+**Read `EKF_TEST_REPORT.md` (repo root) first** - hypotheses H1-H6 answered with numbers,
+findings ranked, candidate filter changes described (not implemented). Suite lives in
+`testing/suite/` (README-style usage at the bottom of the report); baseline results in
+`testing/results/baseline_86193e6/` (results.json, REPORT.md, plots/, TIERB.md,
+VALIDATION.md, RECORDINGS.md). Recordings in `testing/data/` (gitignored).
+
+Headline findings:
+1. **The dominant EKF error is the live dwell-only calibration, not flight.** It lands
+   0.5-1.4 deg off in tilt and 1-7 deg in heading (noise-driven - Gazebo's sensor noise is
+   tiny), and the pinned accel/mag biases freeze that error for the whole flight while P
+   claims ~0.1 deg (NEES 7-70). With the same flights calibrated on noise-free samples
+   (`cal_ideal`) error is 0.01-0.15 deg everywhere, even circle_fast at 13 deg sustained tilt.
+   Root cause candidate: `calibration.py:122-123` still has P0=I and attitude Q 0.01/step
+   (the same oversized Q already fixed in FINAL_gps live mode). Realistic IMU noise in the
+   calibration dwell -> ~5 deg tilt errors and, on circle_fast, a mag-gate lockout (27 deg).
+2. Replay now calibrates on the live calibration's own samples (`<csv>.cal.csv`, written by
+   run_sim.py when SENSOR_LOG is set). The old "row 0 x 200" replay calibration hid all of
+   the above (it's effectively noise-free) - numbers from replays before this are optimistic.
+3. **Controller bug - FIXED later 2026-09-30 at the owner's request** (yaw missions re-recorded
+   clean, see report F8). Was: `cascade.attitude_loop` used the world-frame
+   error `q_sp * q^-1` for body-rate loops.** Fine at yaw 0, cross-couples at 90 deg,
+   positive feedback at 180. yaw_steps/yaw_spin tumble even in ORACLE mode. Fix candidate:
+   `q_err = quat_mult(quat_conjugate(state["quat"]), att_setpoint)` (verified numerically).
+4. `MAX_DT` clamp silently drops rotation during loop stalls (1 s stalls in the patrol
+   recording -> 4-5 deg error -> mag gate locked until a GPS reset).
+5. Tier B: 12/12 live trials survived (hover/box/circle_slow/takeoff_land x3).
+
+Controller and filter math untouched. Pre-approved `FINAL_gps.py` changes only: `self.stats`
+counters/`self.last_d2`, and `get_gps() -> None` = skip the update (bit-identical trace
+before/after on the reference flight).
+
 ## 2026-09-30 session: IT FLIES - stable level hover on the custom EKF, pos_xy enabled
 
 **Result: 3/3 fresh-restart trials (`live_trial2/3/4.log`, 60s each, `pos_xy` kp=0.15

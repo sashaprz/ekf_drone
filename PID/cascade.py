@@ -142,7 +142,12 @@ class Cascade:
     def attitude_loop(self, att_setpoint, state, dt):
         # attitude error (quaternion-aware) -> rate setpoint
         # att_setpoint is a target quaternion [w, x, y, z] (same convention as state["quat"])
-        q_err = quat_mult(att_setpoint, quat_conjugate(state["quat"]))
+        # body-frame error q^-1 * q_sp, 2026-09-30 - was q_sp * q^-1, which is the needed
+        # rotation in WORLD axes, fed to BODY-rate loops. Identical at yaw 0 (why it never
+        # showed), but at yaw 90 a roll error drove the pitch loop and at yaw 180 roll's sign
+        # flipped (positive feedback) - yaw_steps/yaw_spin tumbled even in ORACLE mode
+        # (EKF_TEST_REPORT.md F8).
+        q_err = quat_mult(quat_conjugate(state["quat"]), att_setpoint)
         if q_err[0] < 0:
             q_err = -q_err  # shortest-path fix: q and -q are the same rotation
         err_roll, err_pitch, err_yaw = q_err[1:]  # small-angle approx of the rotation needed

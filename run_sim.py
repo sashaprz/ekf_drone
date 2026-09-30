@@ -234,6 +234,20 @@ def true_str(bridge):
 #   minutes-per-Gazebo-crash.
 ORACLE = os.environ.get("ORACLE") == "1"
 SENSOR_LOG = os.environ.get("SENSOR_LOG")
+# EKF stress-test suite (EKF_TEST_PLAN.md), default off: MISSION=<name> flies a setpoint
+# schedule from testing/suite/missions.py instead of the fixed hover, then holds the
+# last setpoint END_HOLD_S and exits. MAX_VEL_XY / MAX_TILT_DEG override LIMITS for the
+# aggressive missions - meant for ORACLE recordings only, defaults unchanged.
+MISSION = os.environ.get("MISSION")
+
+
+def run_limits():
+    limits = dict(LIMITS)
+    if os.environ.get("MAX_VEL_XY"):
+        limits["max_vel_xy"] = float(os.environ["MAX_VEL_XY"])
+    if os.environ.get("MAX_TILT_DEG"):
+        limits["max_tilt_rad"] = math.radians(float(os.environ["MAX_TILT_DEG"]))
+    return limits
 
 
 def oracle_state(bridge, ekf_state):
@@ -245,18 +259,72 @@ def oracle_state(bridge, ekf_state):
             "rate": np.array(bridge.get_gyro())}
 
 
+class CalRecorder:
+    # SENSOR_LOG only: passes the bridge through to DroneEKF unchanged, but records every
+    # gyro/mag/accel read made during calibration (DroneEKF.__init__) into <log>.cal.csv,
+    # so replay_ekf.py can calibrate on the exact same samples instead of on row 0 alone.
+    def __init__(self, bridge):
+        self._b = bridge
+        self.mag_reference = bridge.mag_reference
+        self.recording = True
+        self.reads = {"gyro": [], "mag": [], "accel": []}
+
+    def _rec(self, name, v):
+        if self.recording:
+            self.reads[name].append(v)
+        return v
+
+    def wait_for_imu(self, timeout=0.1):
+        return self._b.wait_for_imu(timeout)
+
+    def get_gyro(self):
+        return self._rec("gyro", self._b.get_gyro())
+
+    def get_mag(self):
+        return self._rec("mag", self._b.get_mag())
+
+    def get_accel(self):
+        return self._rec("accel", self._b.get_accel())
+
+    def get_gps(self):
+        return self._b.get_gps()
+
+    def save(self, path):
+        self.recording = False
+        with open(path, "w") as f:
+            f.write("gx,gy,gz,mx,my,mz,ax,ay,az\n")
+            for g, m, a in zip(self.reads["gyro"], self.reads["mag"], self.reads["accel"]):
+                f.write(",".join(f"{v:.6f}" for v in (*g, *m, *a)) + "\n")
+
+
 def main():
     bridge = GazeboBridge()
     time.sleep(0.5)  # let the first real gz-transport messages arrive before calibration reads them -
                       # otherwise it'd read the bridge's placeholder zeros (e.g. accel=0 instead of ~9.8)
-    ekf = DroneEKF(sensors=bridge)
-    c = cascade.Cascade({"GAINS": GAINS, "LIMITS": LIMITS})
+    if SENSOR_LOG:
+        rec = CalRecorder(bridge)
+        ekf = DroneEKF(sensors=rec)
+        rec.save(SENSOR_LOG + ".cal.csv")
+    else:
+        ekf = DroneEKF(sensors=bridge)
+    limits = run_limits()
+    c = cascade.Cascade({"GAINS": GAINS, "LIMITS": limits})
 
     setpoint = {"pos": np.array([0.0, 0.0, 2.0]), "yaw": 0.0}  # climb to 2m and hold
+    mission = None
+    if MISSION:
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "testing", "suite"))
+        import missions
+        mission = missions.get(MISSION, GAINS)
+        print(f"MISSION {MISSION}: {mission.desc} - exits at t={mission.total:.0f}s "
+              f"(max_vel_xy={limits['max_vel_xy']}, max_tilt={math.degrees(limits['max_tilt_rad']):.0f}deg)", flush=True)
 
     log = open(SENSOR_LOG, "w") if SENSOR_LOG else None
     if log:
-        log.write("t,gx,gy,gz,ax,ay,az,mx,my,mz,px,py,pz,vx,vy,vz,tqw,tqx,tqy,tqz,tpx,tpy,tpz\n")
+        # mt..evz appended 2026-09-30 for the test suite (mission time, setpoint, the EKF's
+        # live estimate) - replay_ekf.py reads columns by name, so older csvs still work
+        log.write("t,gx,gy,gz,ax,ay,az,mx,my,mz,px,py,pz,vx,vy,vz,tqw,tqx,tqy,tqz,tpx,tpy,tpz,"
+                  "mt,spx,spy,spz,spyaw,eqw,eqx,eqy,eqz,epx,epy,epz,evx,evy,evz\n")
     if ORACLE:
         print("ORACLE MODE - controller is flying on Gazebo ground truth, not the EKF", flush=True)
 
@@ -272,16 +340,23 @@ def main():
             state = oracle_state(bridge, est_state)
 
         now = time.time()
+        if mission is not None:
+            if now - start_t > mission.total:
+                print(f"MISSION_END {MISSION} t={now - start_t:.2f}", flush=True)
+                break
+            setpoint = mission(now - start_t)
         if log:
             tq, tp = bridge.get_true_pose()
             tq, tp = tq or (1.0, 0.0, 0.0, 0.0), tp or (0.0, 0.0, 0.0)
-            row = (now, *bridge.get_gyro(), *bridge.get_accel(), *bridge.get_mag(), *bridge.get_gps(), *tq, *tp)
+            row = (now, *bridge.get_gyro(), *bridge.get_accel(), *bridge.get_mag(), *bridge.get_gps(), *tq, *tp,
+                   now - start_t, *setpoint["pos"], setpoint["yaw"],
+                   *est_state["quat"], *est_state["pos"], *est_state["vel"])
             log.write(",".join(f"{v:.6f}" for v in row) + "\n")
         dt = min(now - last_t, MAX_DT)
         last_t = now
 
         thrust, roll_tau, pitch_tau, yaw_tau = c.step(setpoint, state, dt)
-        m1, m2, m3, m4 = cascade.mix(thrust, roll_tau, pitch_tau, yaw_tau, LIMITS["motor_range"], frame=c.frame)
+        m1, m2, m3, m4 = cascade.mix(thrust, roll_tau, pitch_tau, yaw_tau, limits["motor_range"], frame=c.frame)
         bridge.publish_motors(m1, m2, m3, m4)
 
         i += 1
@@ -295,6 +370,8 @@ def main():
                   f"thrust={thrust:6.1f} tau=({roll_tau:6.1f},{pitch_tau:6.1f},{yaw_tau:6.1f}) "
                   f"pos=({est_state['pos'][0]:5.2f},{est_state['pos'][1]:5.2f},{est_state['pos'][2]:5.2f})"
                   + true_str(bridge), flush=True)
+    if log:
+        log.close()
 
 
 if __name__ == "__main__":
