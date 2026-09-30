@@ -96,3 +96,70 @@ Added `mag_bias` as a full state (mirrors `accel_bias`: same tilt/bias ambiguity
 ## Robustness scenarios (`test_robustness_scenarios.py`)
 
 Three untested-but-plausible failure modes, checked directly: a sustained (not single-spike) magnetometer interference burst is rejected 500/500 by the gate, but heading still drifts ~26° during a 5s outage and recovers slowly afterward - yaw has no backup reference once mag is unavailable. A 30s GPS dropout degrades boundedly (~0.7m to ~1.7m) and recovers cleanly once GPS returns. A sudden mid-flight accel_bias step is tracked correctly but slowly (~40s to mostly converge), consistent with `gyro_bias`'s already-known slow settling rather than a new issue.
+
+## Flying it: PID cascade in Gazebo (`run_sim.py`, `PID/`)
+
+The EKF (`FINAL_gps.py`, the evolved `gps.py`) now drives a cascaded PID controller (position → velocity → attitude → rate → motor mixer) flying PX4's x500 quadrotor in Gazebo Harmonic — real rigid-body physics and simulated sensors, but PX4's own estimator and controller are bypassed entirely; `gz_bridge.py` reads Gazebo's IMU/mag/GPS topics and publishes motor speeds directly.
+
+For a long time it tumbled within ~4-6s of enabling position hold, which looked like a controller resonance. Two diagnostic tools found the real cause: Gazebo's **ground truth** printed next to the estimate, and an **oracle mode** where the controller flies on ground truth instead of the EKF. On truth, with identical gains, it hovered dead level — the controller was fine; the EKF was feeding it a wrong state. Bugs found, all in how Gazebo's data met the EKF:
+
+| Bug | Symptom | Fix |
+|---|---|---|
+| GPS fed as (north, east) but EKF's x axis is east | A swap is a mirror, not a rotation — position feedback pushed the wrong way on one diagonal | Bridge outputs ENU, matching Gazebo's world frame |
+| Mag reference hardcoded horizontal `(1,0,0)` | Gazebo's field is steeply inclined; calibration hid it in `mag_bias_z ≈ 0.89`, and every tilt leaked into fake heading corrections | Reference measured from flight data vs. ground truth: `(0.450, 0.020, 0.893)` |
+| Attitude process noise 0.01 rad²/step | ~10⁹x Gazebo's real gyro noise — single GPS updates rotated attitude by tens of degrees | 1e-7 in live mode |
+| Accel gravity correction in flight | A multirotor's accel measures *thrust* (body z), not gravity, so it pulled attitude toward level while tilted — and \|a\| ≈ 1g, so the gate couldn't catch it | Off in live mode; GPS velocity observes tilt through `F`'s attitude→velocity block instead |
+| Accel/mag bias random walk too loose | Heading error absorbed into `mag_bias` (an injected 10° yaw error stuck at 6.7°), tilt into `accel_bias` (wandered to -3 m/s²) | Pinned near calibrated values in live mode |
+| GPS gate lockout | After one hard event (a ground touch), GPS was rejected forever and altitude ran away to -115 m | Reset position/velocity to GPS after 5 consecutive rejections |
+
+Attitude error on a replay of the flight that crashed (first 12s, same recorded sensor data each time — see `testing/replay_ekf.py` below):
+
+| EKF config | Roll RMS | Pitch RMS | Yaw RMS |
+|---|---|---|---|
+| Correct mag reference, accel correction on, loose bias noise | 16.9° | 8.1° | 12.2° |
+| + bias noise pinned | 4.7° | 1.5° | 9.0° |
+| + accel gravity correction off | **0.14°** | **0.12°** | **0.20°** |
+
+One lesson worth keeping: the magnetometer was first "fixed" by copying PX4's remap for Gazebo's supposedly left-handed mag frame. Checked against ground truth under rotation, that made estimated yaw turn *opposite* to true yaw — the raw reading was already correct, only the reference vector was wrong. Frame claims get verified against truth now, not taken from comments.
+
+Two controller fixes, confirmed in oracle mode: altitude gains re-derived from the actual thrust sensitivity (0.026 m/s² per rad/s of motor trim — the old `vel_z` loop was slower than the `pos_z` loop wrapped around it, giving a 0↔4 m oscillation every ~6s), and the attitude D-term moved onto the gyro rate so tilt-setpoint changes no longer cause derivative kicks.
+
+**Result: 3/3 fresh 60s flights on the EKF held true roll/pitch at 0.0°, altitude at 2.00 ± 0.01 m, and horizontal position within a few cm, with position hold on.**
+
+## File structure
+
+```
+run_sim.py                  flies the full cascade in Gazebo; GAINS/LIMITS live here (single source of truth)
+PID/
+  cascade.py                position -> velocity -> attitude -> rate loops, plus the motor mixer
+  pid.py                    PID class (anti-windup, filtered derivative-on-measurement)
+  gz_bridge.py              Gazebo <-> Python: sensor topics in, motor speeds out, ground truth for logging
+state estimation/
+  FINAL_gps.py              the EKF in use: 18-state quaternion MEKF (attitude, gyro bias, velocity,
+                            position, accel bias, mag bias) - the evolved gps.py from the sections above
+  calibration.py            pre-flight calibration filter that seeds FINAL_gps.py
+  complementary.py, ekf_angle_based.py, ekf_gyro_bias.py, ekf.py, quaternarions.py
+                            the earlier filters from the progression above, kept for comparison
+  testing/                  offline EKF tests + the graphs in this README (test_*.py, plot_*.py, *.png)
+testing/                    Gazebo test harnesses + the replay tool
+HANDOFF.md                  running engineering log: every bug, theory, and result, in detail
+```
+
+### Running it (needs WSL + PX4/Gazebo, see `HANDOFF.md`)
+
+Start Gazebo with `make px4_sitl gz_x500` in `~/PX4-Autopilot`, kill only the PX4 process (`pkill -9 -f bin/px4`) so the motor topic is free, then:
+
+| Command | What it does |
+|---|---|
+| `python3 run_sim.py` | Full cascade: climb to 2 m and hold. Prints the estimate next to Gazebo's true attitude/position |
+| `ORACLE=1 python3 run_sim.py` | Controller flies on ground truth instead of the EKF — separates "controller problem" from "estimator problem" |
+| `SENSOR_LOG=flight.csv python3 run_sim.py` | Also records every tick's raw sensors + ground truth, for replay |
+| `bash testing/run_rate_test.sh roll 0.3 5.0` | Innermost loop only: step one axis's rotation rate (rad/s) — args are axis, step, duration |
+| `bash testing/run_attitude_test.sh pitch 0.2 3.0` | Attitude + rate loops: step a tilt/heading angle (rad) |
+| `bash testing/run_velocity_test.sh vz 0.5 3.0` | Velocity + attitude + rate loops: step a velocity (m/s) |
+
+The loop harnesses exist for inside-out tuning — the standard flight-controller practice of getting the rate loop right before trusting attitude, and attitude before velocity/position. They share takeoff/reset code in `testing/test_common.py` and write their logs into `testing/`.
+
+### Offline replay (`testing/replay_ekf.py`)
+
+`python testing/replay_ekf.py flight.csv` feeds a recorded flight back through `DroneEKF` exactly as if it were live, then reports the estimate's error against Gazebo's ground truth. No Gazebo needed, ~3 seconds per run, identical data every time, so two EKF versions can be compared fairly — that's how the estimator bugs above were found. Knobs: `T_END=12` scores only the first N seconds; `EXP="QATT=1e-6 R_ACC=5 ROLL0=5 ..."` overrides noise settings or injects a known attitude error without editing the EKF (full list in the file). Add `MAG_REMAPPED=0` for recordings made after 2026-09-30.
