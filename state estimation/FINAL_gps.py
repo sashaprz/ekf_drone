@@ -95,6 +95,7 @@ I = np.eye(18) #identity matrix for updating the covariance
 #receiver's datasheet - swap in real numbers once you know the actual hardware.
 R_gps = np.diag([6.25, 6.25, 25.0, 0.0225, 0.0225, 0.09])
 gps_period = 0.2
+GPS_LOCKOUT_RESETS = 5  # consecutive gate rejections (~1s at gps_period) before resetting pos/vel to GPS
 
 #math helpers
 def rotate_by_quat(q, v):
@@ -285,6 +286,45 @@ class DroneEKF:
         self._get_accel = get_accel if sensors is None else sensors.get_accel
         self._get_mag = get_mag if sensors is None else sensors.get_mag
         self._get_gps = get_gps if sensors is None else sensors.get_gps
+        # world-frame mag field direction, 2026-09-30 - was hardcoded (1,0,0) (horizontal,
+        # pointing along world x) in both the step() mag model and calibration. True for
+        # this file's synthetic sensors, but not for Gazebo, whose field dips ~63deg down
+        # and points north (world +y in ENU) - see gz_bridge.py's MAG_REFERENCE_ENU.
+        # Sensors can supply their own via a `mag_reference` attribute.
+        _mag_ref = np.asarray(getattr(sensors, "mag_reference", (1.0, 0.0, 0.0)), dtype=float)
+        self._mag_ref = _mag_ref / np.linalg.norm(_mag_ref)
+        # live-bridge attitude process noise, 2026-09-30. Module-level Q's attitude block
+        # (0.01 rad^2 added EVERY predict step, not dt-scaled) is ~1e9x what Gazebo's
+        # gyro actually warrants (x500 IMU: 0.00087 rad/s stddev at 250Hz -> ~1e-11 rad^2
+        # per step). At the ~250Hz this now runs at, that's a ~1.6 rad/sqrt(s) random
+        # walk - the filter barely trusted the gyro, P_attitude ballooned, and so did the
+        # attitude<->velocity cross-covariance, letting a single GPS velocity residual
+        # rotate the attitude estimate by tens of degrees in one update (seen directly in
+        # framefix_trial1.log: est yaw 3 -> -71deg in 0.12s with gyro_z ~0.05 rad/s, plus
+        # a 0.6m position jump - a GPS update, not a real maneuver - which kicked off the
+        # tumble). 1e-5 (~3mrad per step) still leaves lots of margin over the real gyro
+        # noise. Synthetic mode keeps the old Q so the existing EKF tests are unaffected.
+        self.Q = Q.copy()
+        if sensors is not None:
+            # 1e-5 tried first: still let a decelerating climb's accel residuals rotate
+            # the estimate ~23deg in 0.6s AGAINST the gyro (accelR_trial1.log vs Gazebo
+            # ground truth). 1e-7 (~0.3deg/sqrt(s)) is still ~1e4x the real gyro noise.
+            self.Q[0:3, 0:3] = np.eye(3) * 1e-7
+        # live-bridge: accel gravity-vector correction OFF, 2026-09-30. It assumes the
+        # accel measures gravity, but a multirotor's accel measures THRUST (body z) plus
+        # rotor drag - in flight it read ~(0, 0, 9.8) while the gravity it was compared
+        # against had up to 2.2 m/s^2 horizontal (sensors_live1.csv vs ground truth).
+        # |a| stays ~1g, so the deviation gate can't catch it, and every tick dragged
+        # attitude toward level (and yaw along with it, via cross-covariance). Tried
+        # weakening it (R 0.5, k=50) before removing it - still 1-3deg rms worse on
+        # replay. Tilt is still observable without it: accel drives the velocity
+        # prediction, and F's attitude->velocity block lets GPS velocity correct tilt;
+        # mag covers heading. Offline replay of the flight that crashed:
+        # 0.14/0.12/0.20deg rms attitude error with this, 4.7/1.5/9.0deg with it on.
+        # Synthetic mode (sensors=None) keeps it - its simulated accel IS gravity-only.
+        self.use_accel_correction = sensors is None
+        self.R_accel_base = R_accel_base.copy()
+        self.k = k
 
         #state variables - placeholders, overwritten by the pre-flight calibration call below
         #(get_gyro/get_accel/get_mag have to be defined first, so the actual calibrate() call
@@ -333,6 +373,14 @@ class DroneEKF:
                                        dwell_steps=_CAL_DWELL_STEPS, wiggle_steps=400, dt=_CAL_DT,
                                        gravity=GRAVITY, accel_noise_var=ACCEL_NOISE_STD**2, mag_noise_var=MAG_NOISE_STD**2)
         else:
+            # 2026-09-30: calibrate() reads get_gyro first every step - block there until a
+            # NEW IMU sample lands, so the dwell is 200 real samples (~0.8s at 250Hz), not
+            # 200 instant reads of one cached value. Live calibrated_yaw varied -7.6..+2.3
+            # deg run to run, and that error then stuck for the whole flight.
+            def _fresh_gyro():
+                if hasattr(sensors, "wait_for_imu"):
+                    sensors.wait_for_imu()
+                return self._get_gyro()
             # live-bridge mode: calibrating against the synthetic _cal_get_* functions here
             # would learn a bias correction for TRUE_GYRO_BIAS etc., which have nothing to do
             # with this sensor's actual (near-zero) bias - inject a real, wrong, persistent
@@ -342,9 +390,10 @@ class DroneEKF:
             # problem) is fully observable at rest regardless - see calibration.py's docstring.
             self.q, (self.bias_x, self.bias_y, self.bias_z), (self.accel_bias_x, self.accel_bias_y, self.accel_bias_z), \
                 (self.mag_bias_x, self.mag_bias_y, self.mag_bias_z), _P_cal = \
-                calibration.calibrate(self._get_gyro, self._get_accel, self._get_mag,
+                calibration.calibrate(_fresh_gyro, self._get_accel, self._get_mag,
                                        dwell_steps=_CAL_DWELL_STEPS, wiggle_steps=0, dt=_CAL_DT,
-                                       gravity=GRAVITY, accel_noise_var=ACCEL_NOISE_STD**2, mag_noise_var=MAG_NOISE_STD**2)
+                                       gravity=GRAVITY, accel_noise_var=ACCEL_NOISE_STD**2, mag_noise_var=MAG_NOISE_STD**2,
+                                       mag_ref=self._mag_ref)
         #main loop below uses get_gyro/get_accel/get_mag (the constant "in-flight" stubs), not the _cal_* functions
 
         #map calibration's 12x12 P (attitude, gyro_bias, accel_bias, mag_bias, in that order)
@@ -369,9 +418,33 @@ class DroneEKF:
         self.P[15:18, 12:15] = _P_cal[9:12, 6:9]
         self.P[15:18, 15:18] = _P_cal[9:12, 9:12] #mag_bias-mag_bias
 
+        if sensors is not None:
+            # live-bridge bias process noise, 2026-09-30: module Q adds 1e-6 to each
+            # accel/mag bias EVERY step - at ~250Hz that's a random walk of ~0.05 in 10s
+            # on a unit mag vector, so heading error got absorbed into mag_bias instead of
+            # being corrected (replay: an injected 10deg yaw error stuck at 6.7deg), and
+            # tilt error into accel_bias (wandered to -3 m/s^2; Gazebo's is 0). Neither is
+            # observable from a dwell-only calibration or level hover anyway. Pin both near
+            # the calibrated value; gyro bias (observable at rest) is left alone.
+            self.Q[12:18, 12:18] = np.eye(6) * 1e-12
+            self.P[12:18, :] = 0.0
+            self.P[:, 12:18] = 0.0
+            self.P[12:18, 12:18] = np.eye(6) * 1e-6
+
+        # TEMP DIAGNOSTIC (2026-09-27) - checking the dwell-only-calibration
+        # mag_bias/heading-ambiguity hypothesis (see HANDOFF.md's "Same-day follow-up"
+        # section): if calibration's converged mag_bias/heading combination varies
+        # meaningfully across fresh runs from what should be the same real sensor
+        # state, that's evidence the ambiguity is real. Remove once resolved.
+        _cal_w, _cal_x, _cal_y, _cal_z = self.q
+        _cal_yaw = math.atan2(2 * (_cal_w * _cal_z + _cal_x * _cal_y), 1 - 2 * (_cal_y * _cal_y + _cal_z * _cal_z))
+        print(f"CAL_DIAG bias_z={self.bias_z:+.5f} mag_bias=({self.mag_bias_x:+.5f},{self.mag_bias_y:+.5f},"
+              f"{self.mag_bias_z:+.5f}) calibrated_yaw={math.degrees(_cal_yaw):+.3f}deg", flush=True)
+
         #timing starts here, AFTER calibration - see the comment above where these used to live
         self.last_time = time.time()
         self.last_gps_time = time.time()
+        self.gps_rejections = 0
 
     def apply_correction(self, correction):
         #injects one measurement's correction immediately and re-normalizes q, instead of
@@ -437,7 +510,7 @@ class DroneEKF:
         # what prediction was actually integrating.
         accel_magnitude = math.sqrt(corrected_accel_x**2 + corrected_accel_y**2 + corrected_accel_z**2)
         deviation = abs(accel_magnitude - GRAVITY) #how far off from 1g is the (bias-corrected) accel reading?
-        R_accel = R_accel_base * (1 + k * deviation ** 2) #increase accel measurement noise if drone is accelerating
+        R_accel = self.R_accel_base * (1 + self.k * deviation ** 2) #increase accel measurement noise if drone is accelerating
 
         corrected_mag_x = mag_x - self.mag_bias_x
         corrected_mag_y = mag_y - self.mag_bias_y
@@ -465,7 +538,7 @@ class DroneEKF:
         # Update the state transition matrix based on the current state and time step
         w = np.array([corrected_gyro_x, corrected_gyro_y, corrected_gyro_z])
         self.F = update_F(w, dt, self.F, self.q, corrected_accel) #describes how error state vector evolves.
-        self.P = self.F @ self.P @ self.F.T + Q #update covariance error matrix, uncertainty increases because we are just integrating the model
+        self.P = self.F @ self.P @ self.F.T + self.Q #update covariance error matrix, uncertainty increases because we are just integrating the model
 
         #Each correction below is applied immediately (apply_correction) and re-linearizes
         #the next one against the just-updated q, rather than pooling all three against one
@@ -474,8 +547,8 @@ class DroneEKF:
         #gated bc gps sample rate is lower than accel/mag/gyro
         if now - self.last_gps_time >= gps_period:
             #get gps data
-            north, east, up, vel_north, vel_east, vel_up = self._get_gps()
-            gps_measurement = np.array([north, east, up, vel_north, vel_east, vel_up]) #current GPS position + velocity, compared against predicted position/velocity in the gps correction step
+            gps_x, gps_y, gps_z, gps_vx, gps_vy, gps_vz = self._get_gps()  # world frame (ENU for gz_bridge)
+            gps_measurement = np.array([gps_x, gps_y, gps_z, gps_vx, gps_vy, gps_vz]) #current GPS position + velocity, compared against predicted position/velocity in the gps correction step
 
             #gps correction
             self.H_gps = update_H_gps(self.H_gps) #builds measurment jacobian for this update
@@ -488,6 +561,26 @@ class DroneEKF:
             d_squared_gps = residual_gps.T @ np.linalg.inv(S_gps) @ residual_gps
 
             #to catch unreasonable measurements and not let them corrupt the state.
+            # lockout recovery, 2026-09-30: once one hard event (e.g. a ground touch)
+            # pushes vel/pos far enough off that the gate rejects GPS, nothing ever pulls
+            # them back, so the error only grows and GPS stays rejected forever - replayed
+            # sensors_oracle1.csv: est altitude ran to -115m after a bounce at t~11s while
+            # truth hovered at 0-4m. After GPS_LOCKOUT_RESETS consecutive rejections, snap
+            # pos/vel to the fix and re-open their covariance (PX4's EKF2 does the same).
+            if d_squared_gps > chi2_threshold_gps:
+                self.gps_rejections += 1
+                if self.gps_rejections >= GPS_LOCKOUT_RESETS:
+                    print(f"EKF_GPS_RESET t={now:.3f} after {self.gps_rejections} rejections "
+                          f"d2={d_squared_gps:.1f} pos_err={residual_gps[0:3].round(2)}", flush=True)
+                    self.position = gps_measurement[0:3].copy()
+                    self.velocity = gps_measurement[3:6].copy()
+                    self.P[6:12, :] = 0.0
+                    self.P[:, 6:12] = 0.0
+                    self.P[6:12, 6:12] = R_gps[[3, 4, 5, 0, 1, 2]][:, [3, 4, 5, 0, 1, 2]]
+                    self.gps_rejections = 0
+            else:
+                self.gps_rejections = 0
+
             if d_squared_gps <= chi2_threshold_gps:
                 self.apply_correction(K_gps @ residual_gps)
                 #Joseph form - numerically robust to floating-point drift (keeps P symmetric/PSD),
@@ -508,7 +601,7 @@ class DroneEKF:
         #gate against BASE noise, not the already-inflated adaptive R_accel - otherwise
         #adaptive R inflates in lockstep with the residual and the gate can never fire
         #(d_squared asymptotes to ~1/k for large outliers regardless of severity)
-        S_accel_gate = self.H_accel @ self.P @ self.H_accel.T + R_accel_base
+        S_accel_gate = self.H_accel @ self.P @ self.H_accel.T + self.R_accel_base
         d_squared = residual_accel.T @ np.linalg.inv(S_accel_gate) @ residual_accel
 
         # TEMP DIAGNOSTIC (2026-09-26) - chasing a sudden single-tick attitude jump seen
@@ -516,14 +609,17 @@ class DroneEKF:
         # stays smooth through the same tick - theory is a bad accel correction slipping
         # through during real (non-hover) acceleration. Remove once resolved.
         correction_accel = K_accel @ residual_accel
-        if d_squared <= chi2_threshold:
+        if not self.use_accel_correction:
+            pass
+        elif d_squared <= chi2_threshold:
             print(f"EKF_ACCEL t={now:.6f} FIRED   dev={deviation:.4f} d2={d_squared:8.2f} "
-                  f"thr={chi2_threshold:.2f} dtheta={np.linalg.norm(correction_accel[0:3]):.4f}", flush=True)
+                  f"thr={chi2_threshold:.2f} dtheta={np.linalg.norm(correction_accel[0:3]):.4f} "
+                  f"dyaw={correction_accel[2]:+.5f}", flush=True)
         else:
             print(f"EKF_ACCEL t={now:.6f} REJECTED dev={deviation:.4f} d2={d_squared:8.2f} "
                   f"thr={chi2_threshold:.2f}", flush=True)
 
-        if d_squared <= chi2_threshold:
+        if d_squared <= chi2_threshold and self.use_accel_correction:
           self.apply_correction(correction_accel)
           #this is the second p update, after we incorporate a measuremnt uncertainty goes down bc that is another measurement source
           self.P = (I - K_accel @ self.H_accel) @ self.P @ (I - K_accel @ self.H_accel).T + K_accel @ R_accel @ K_accel.T
@@ -532,7 +628,7 @@ class DroneEKF:
         #mag correction - predicted_mag uses q as it stands AFTER the accel correction just
         #applied, not the stale pre-accel q - this is what actually removes the overcorrection
         #risk, not just avoiding a bad P0 (see apply_correction's comment)
-        predicted_mag = rotate_by_quat(quat_conjugate(self.q), np.array([1.0, 0.0, 0.0]))
+        predicted_mag = rotate_by_quat(quat_conjugate(self.q), self._mag_ref)
         self.H_mag = update_H_mag(predicted_mag, self.H_mag)
 
         S_mag = self.H_mag @ self.P @ self.H_mag.T + R_mag
@@ -541,6 +637,19 @@ class DroneEKF:
         #gate against magnetic interference (motors/ESCs) - R_mag is static, not
         #adaptively inflated like R_accel, so no separate "base" R is needed here
         d_squared_mag = residual_mag.T @ np.linalg.inv(S_mag) @ residual_mag
+
+        # TEMP DIAGNOSTIC (2026-09-27) - chasing the isolated-attitude-loop yaw test's
+        # monotonic yaw drift (ignores commanded setpoint entirely, unlike roll/pitch) -
+        # theory is mag corrections getting rejected once the yaw estimate has drifted
+        # enough that it and the mag reading disagree, a self-reinforcing gate failure.
+        # Remove once resolved.
+        correction_mag = K_mag @ residual_mag
+        if d_squared_mag <= chi2_threshold:
+            print(f"EKF_MAG t={now:.6f} FIRED    d2={d_squared_mag:8.2f} thr={chi2_threshold:.2f} "
+                  f"dtheta={np.linalg.norm(correction_mag[0:3]):.4f} dyaw={correction_mag[2]:+.5f} "
+                  f"gyro_z={corrected_gyro_z:+.4f}", flush=True)
+        else:
+            print(f"EKF_MAG t={now:.6f} REJECTED d2={d_squared_mag:8.2f} thr={chi2_threshold:.2f}", flush=True)
 
         if d_squared_mag <= chi2_threshold:
             self.apply_correction(K_mag @ residual_mag)

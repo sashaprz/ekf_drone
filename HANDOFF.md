@@ -1,5 +1,110 @@
 # Handoff: PID cascade tuning against Gazebo/x500
 
+## 2026-09-30 session: IT FLIES - stable level hover on the custom EKF, pos_xy enabled
+
+**Result: 3/3 fresh-restart trials (`live_trial2/3/4.log`, 60s each, `pos_xy` kp=0.15
+on - the gain that tumbled every trial before) held Gazebo-TRUE roll/pitch at 0.0deg,
+altitude 2.00 +/- 0.01m, horizontal position settling to within a few cm, zero GPS
+lockouts.** The "pos_xy resonance" was never a controller resonance: the controller
+was being fed a wrong state. Root causes, in the order found (details in the code
+comments at each site):
+
+1. **GPS axes swapped** (`gz_bridge.py` `_on_gps`): EKF world x = spawn heading =
+   Gazebo east, but the bridge fed (north, east, up). A swap is a mirror - position
+   feedback was positive along one diagonal. EKF world frame is now defined as Gazebo's
+   ENU, so estimate and ground truth are directly comparable.
+2. **Mag reference wrong** (`MAG_REFERENCE_ENU` in `gz_bridge.py`, threaded through
+   `FINAL_gps.py`/`calibration.py` as `mag_ref`): the EKF assumed horizontal (1,0,0);
+   gz-sim's field in its world frame is (0.450, 0.020, 0.893) - MEASURED by rotating
+   raw mag readings by true attitude (std 0.001 over a 30deg-tilt flight). The old
+   `mag_bias_z ~0.89` in every CAL_DIAG was calibration hiding this.
+   **Correction to my own work, same day:** I first "fixed" the mag frame with PX4's
+   `(-y, -x, z)` remap, per a GZBridge.cpp comment calling gz's mag "left handed".
+   Wrong for this use - the raw reading is already correct body FLU; the remap made
+   estimated yaw move OPPOSITE to true yaw. Reverted to raw passthrough. Lesson: verify
+   frame claims against ground truth under rotation, not at one orientation.
+3. **Attitude process noise ~1e9x too big** (`self.Q` live override): 0.01 rad^2 per
+   step at 250Hz - P_attitude ballooned and single GPS updates rotated attitude tens of
+   degrees. Live mode now 1e-7.
+4. **Accel gravity-vector correction is the wrong model in flight** (now OFF in live
+   mode, `self.use_accel_correction`): a multirotor's accel reads thrust (~(0,0,9.8)
+   body) not gravity, |a| stays ~1g so the deviation gate can't tell, and it dragged
+   attitude toward level + yaw via cross-covariance. GPS velocity observes tilt via F.
+5. **Accel/mag bias random walk far too loose** (live override): heading error got
+   absorbed into mag_bias (10deg injected yaw error stuck at 6.7deg), tilt into
+   accel_bias (wandered to -3 m/s^2). Pinned (Q 1e-12, P 1e-6).
+6. **GPS chi2 lockout** - after a hard event nothing recovered; now resets pos/vel to
+   GPS after 5 consecutive rejections (`GPS_LOCKOUT_RESETS`, prints `EKF_GPS_RESET`).
+7. **Live calibration** now waits for a fresh IMU sample per dwell step.
+8. **Controller side** (secondary - verified in ORACLE mode below):
+   - `pos_z`/`vel_z` re-tuned from the real plant gain (0.026 m/s^2 per rad/s of
+     trim): vel_z kp 15->100 ki 20->25, pos_z kp 1.5->1.0 kd 0.3->0. Old gains made a
+     0<->4m, ~6s altitude oscillation (reproduced by a 1-D sim before changing them).
+     `vel_z` integral_limits rescaled to (-16,10) so ki*integral spans the same trim range.
+   - `attitude_loop()` D-term now `-kd * gyro_rate / 2` instead of d(err)/dt (the latter
+     kicked on every tilt-setpoint change). `vel_xy` got `d_filter_alpha: 0.2`.
+
+**New tools - use these first next time:**
+- `run_sim.py` prints Gazebo ground truth (`TRUE rpy/pos`) next to the estimate
+  (`GazeboBridge.get_true_pose()`, `/world/default/pose/info`, logging only).
+- `ORACLE=1 python3 run_sim.py` - controller flies on ground truth; separates
+  controller problems from estimator problems. (Oracle hover was perfect once the
+  vertical gains were fixed - the controller was never the main problem.)
+- `SENSOR_LOG=x.csv python3 run_sim.py` records raw sensors + truth every tick;
+  `python replay_ekf.py x.csv` replays the EKF offline vs truth in seconds
+  (`T_END=`, `EXP="QATT=.. R_ACC=.. ROLL0=5 ..."` knobs - see the file). NOTE: csvs
+  recorded before the mag revert hold remapped mag; replay undoes it by default
+  (`MAG_REMAPPED=1`) - pass `MAG_REMAPPED=0` for csvs recorded from now on.
+
+**Open / next steps:**
+- Calibrated heading varies run to run (true yaw -4.7/-0.8/+1.4deg vs estimate ~0), and
+  a constant ~0.5deg roll offset - dwell-only calibration ambiguity (now pinned by the
+  tight bias P). Harmless at hover; fix with a known-level/known-heading assumption at
+  calibration or a real wiggle.
+- Not yet tested: position setpoint steps / moving flight, re-enabling a larger
+  `pos_xy` kp, higher `max_vel_xy` (still 1.5), disturbance rejection. Everything below
+  this section predates these fixes - its gain conclusions were drawn against a broken
+  estimator and should be re-checked, not trusted.
+- `EKF_MAG` TEMP DIAGNOSTIC in `FINAL_gps.py` still prints every tick - remove when done.
+
+## 2026-09-28 session: max_vel_xy cap tested, did NOT fix the pos_xy resonance
+
+Tested the "concrete next step" queued at the end of the 2026-09-27 session: cut
+`LIMITS["max_vel_xy"]` 5.0->1.5 (gains/`vel_xy` itself left untouched, single-variable
+test) on the theory that capping how much horizontal velocity can ever build would
+bound the rotorDrag/velocity-feedback disturbance torque directly, regardless of which
+attitude axis it happens to destabilize on a given run.
+
+**Result (`posxy_maxvelxy15_trial1.log`, fresh Gazebo restart, `pos_xy` at kp=0.15,
+`att_yaw` kp=4.0 - current GAINS unchanged otherwise): tumbled at t=4.78s, ROLL-led**
+(`rate_meas` roll jumped to -20.61 rad/s in one tick, `tau` saturated on roll+yaw
+simultaneously; pitch/roll `tau` were both already climbing toward ~40+ together in
+the ~0.3s before the spike). This is earlier than any of the 3 post-att_yaw-fix trials
+from 2026-09-27 (16.4s / 5.14s / 6.06s) and right back in the original pre-any-fix
+~4.3-5.1s failure window. Position stayed bounded (<1m) right up to the spike, so the
+velocity cap does appear to have done its job of preventing large velocity buildup -
+but the resonance fired anyway, just as early. **This is a real, if disappointing,
+result against the "cap velocity to starve the disturbance" theory** - at minimum it's
+not sufficient on its own. Per this file's own repeated lesson, one trial isn't proof
+(the whole point of items #14/CURRENT-blocker), so don't fully discard the theory
+either - but don't credit it either without more trials.
+
+**What's different about this trial worth noting**: roll_tau AND pitch_tau were both
+climbing together toward their (implicit, via max_tilt_rad-driven rate_sp saturation)
+ceiling in the runup to the spike, not just velocity being large - suggests the trigger
+might be closer to "attitude/rate loop asked to do too much correction at once"
+(possibly `max_tilt_rad`=15deg, or `pos_xy`/`vel_xy`'s own gain shape commanding large
+tilts) rather than purely "too much horizontal velocity accumulated". Worth checking
+`roll_sp`/`pitch_sp` values directly (not currently in `run_sim.py`'s print) in the
+window before a future tumble, the same way `a_right`'s sign bug was originally found
+via `test_velocity_loop.py`'s own setpoint logging.
+
+**Left as-is for now, not reverted** - `max_vel_xy=1.5` isn't proven harmful, and the
+reasoning for it (bound the disturbance's maximum possible size) is still sound even if
+this trial didn't confirm it helps. Next `pos_xy` trial should keep this value unless a
+specific new reason says otherwise, and should log `roll_sp`/`pitch_sp` to test the
+"saturating tilt setpoints" theory above before trying another gain change blind.
+
 ## 2026-09-27 session: found and fixed the actual root cause of the run-to-run variance
 
 **The control loop (`run_sim.py` and every `test_*_loop.py` harness) was an
@@ -62,6 +167,75 @@ below for the full detail):**
   smoothly growing/oscillating accel deviation before each tumble, not corrupted-sensor
   garbage), not a bad pos_xy gain choice - the cascade doesn't yet have enough damping
   margin to absorb ANY outer-loop position correction. `pos_xy` is back to 0 for now.
+
+### Same-day follow-up: isolated per-loop testing found a real yaw/EKF issue, likely root cause
+
+User asked to keep testing in isolation (rate loop, then attitude loop, one axis at a
+time) rather than jump straight back to `pos_xy` guessing. Results, each a fresh
+Gazebo restart, `GAINS` unchanged from `run_sim.py`:
+
+- **Rate loop, all 3 axes: still clean** (`run_rate_test.sh roll/pitch/yaw 0.3 5.0`) -
+  roll settles ~0.28, pitch ~0.29, yaw ~0.25 rad/s, no overshoot/oscillation on any
+  axis. Confirms the rate loop is still solid after the timing fix - not where the
+  remaining problem lives.
+- **Attitude loop, pitch: clean** (`run_attitude_test.sh pitch 0.2 3.0`) - tracks to
+  ~0.266 (slight overshoot), decays smoothly after the step, no tumble. Real but
+  bounded yaw cross-coupling (yaw drifted to 0.23 rad during the pitch hold, recovered
+  after) - a secondary effect, not a failure.
+- **Attitude loop, roll: real instability, NOT a new bug** - roll drifted from -0.03 to
+  -0.25 rad (-14°) during the pre-step "should be level" phase alone (sp=0.00 the whole
+  time), correlating with growing horizontal velocity (vel(x,y) grew to ~-0.11/-0.17
+  m/s over the same window) - i.e. the same rotorDrag-driven disturbance-torque
+  feedback effect already documented for the isolated rate-loop test (see "Isolated
+  rate-loop tests show a real velocity-driven drift..." elsewhere in this file), now
+  visible one loop level up because nothing above attitude_loop bounds velocity in this
+  harness either. A catastrophic multi-axis tumble followed as the step ended. This
+  matches the test's OWN pre-existing docstring warning almost exactly ("a 0.2 rad
+  roll step held for 1.667s... suffered a sudden, severe multi-axis breakdown... around
+  0.7s into the hold") - a known limitation of the isolated-attitude-loop harness
+  design, not a new regression.
+- **Attitude loop, yaw: a real, different, and likely more important bug.** Unlike
+  roll/pitch, yaw drifted *monotonically away from the commanded setpoint* from t=0.04
+  onward regardless of what was commanded (target +0.2 rad, actual ran to -1.3+ rad)
+  - and, unlike roll, with only small velocity buildup, ruling out the same
+  rotorDrag-feedback mechanism. **Root-cause work (added a temporary `EKF_MAG`
+  diagnostic to `FINAL_gps.py`'s `step()`, mirroring the existing `EKF_ACCEL` one -
+  left in place, same convention):**
+  - Mag corrections ARE firing most of the time (683/900 in one 3s trial, 76%) - ruled
+    out "gate always rejects" as the explanation.
+  - Verified numerically (see `scratch_yaw_check.py` pattern, not kept in the repo)
+    that the EKF's own gyro-integration prediction step is directionally correct in
+    isolation: fed a realistic mid-test state (roll=-0.151, pitch=-0.144,
+    body_rate=(0.589, 0.351, 0.249)), it correctly predicts yaw increasing, matching
+    the sign of the measured body yaw rate. The predict step itself is not buggy.
+  - But the measured body yaw rate (`gyro_z`) averaged **+0.169 rad/s** (positive)
+    throughout a 3s trial, while both aiding corrections net-pulled yaw **negative**
+    over the same window (mag: sum -0.886 across 417 fired corrections, mean
+    -0.00212/tick; accel: sum -0.398 across 578 fired corrections) - i.e. the
+    corrections are consistently fighting the gyro-implied rotation and losing net,
+    which is exactly the observed drift.
+  - **Leading hypothesis, not yet confirmed by a targeted test: the already-documented
+    dwell-only calibration gap.** `FINAL_gps.py`'s own comment on the live-bridge
+    calibration path says outright: "Dwell-only (no wiggle - nothing here can command
+    an actual wiggle maneuver), so accel_bias/mag_bias may keep some tilt/heading
+    ambiguity" - previously judged "probably low priority" in this file's "What's NOT
+    resolved" section, since it hadn't yet been seen to matter in practice. This isolated
+    yaw test is the first scenario that plausibly exercises it: without a real wiggle,
+    `mag_bias` and true heading are mathematically indistinguishable from a single
+    calibration orientation, so `mag_bias` likely converged to a value that's subtly
+    entangled with an assumed (possibly wrong) heading - meaning mag's "true north"
+    reference is itself slightly off in a way that fights real yaw motion afterward,
+    exactly the sustained, systematic (not random-noise) pull seen above. This is a
+    plausible, well-motivated hypothesis given the evidence, but NOT yet confirmed by a
+    dedicated test (e.g., logging `mag_bias_x/y/z` after calibration, or commanding an
+    actual pre-flight wiggle and seeing if the yaw-test symptom disappears) - don't
+    treat it as proven.
+  - Alternative not yet ruled out: a genuine physical yaw disturbance (e.g. gyroscopic
+    cross-coupling from the simultaneously-growing roll/pitch tilt feeding into yaw)
+    that `att_yaw`'s current kp=1.5 simply isn't strong enough to cancel, independent
+    of any calibration issue. The mag_bias hypothesis is favored because it's already
+    documented as a known gap in this exact code path, but this alternative hasn't
+    been eliminated.
 
 ## Goal
 
@@ -179,13 +353,23 @@ The repo is at `C:\Users\Sasha\repos\python_drone`, reachable from WSL at
 
 This took many iterations to get reliable - follow it exactly.
 
-1. **Launch PX4+Gazebo together** (in its own terminal, stays running/foreground):
+**Headless by default as of 2026-09-27** - the Gazebo GUI process (`gz sim -g`) is a
+real memory/CPU cost on the Windows host (WSLg-rendered), and the user's machine only
+has 15.6GB total RAM shared with a normal desktop workload (browser, IDE, Slack, etc.)
+- confirmed down to ~0.5GB free during a session with many GUI restarts. Prefix with
+`HEADLESS=1` (see step 1 below) unless you specifically need to watch the 3D view -
+everything else (topics, logs, test harnesses) works identically headless, and only
+the `gz sim -s ...` server process runs, not `gz sim -g`.
+
+1. **Launch PX4+Gazebo together, headless** (in its own terminal, stays
+   running/foreground):
    ```
-   wsl -d Ubuntu-24.04 -- bash -c "cd ~/PX4-Autopilot && make px4_sitl gz_x500"
+   wsl -d Ubuntu-24.04 -- bash -c "cd ~/PX4-Autopilot && HEADLESS=1 make px4_sitl gz_x500"
    ```
-2. **If the Gazebo GUI window doesn't render** (shows blank, or doesn't appear at
-   all, despite the process running - check with `ps aux | grep -i 'gz sim'` in a
-   second terminal) - this is a recurring WSLg display glitch, not a real failure.
+   (drop `HEADLESS=1` only if you actually need the GUI for something specific)
+2. **If the Gazebo GUI window doesn't render** (GUI mode only, shows blank, or doesn't
+   appear at all, despite the process running - check with `ps aux | grep -i 'gz sim'`
+   in a second terminal) - this is a recurring WSLg display glitch, not a real failure.
    Fix: `wsl --shutdown` (from PowerShell), wait a few seconds, then redo step 1.
 3. **Kill only PX4's process**, not Gazebo, to free the motor-command topic for our
    own script:
@@ -427,28 +611,83 @@ This took many iterations to get reliable - follow it exactly.
     re-running now that trials should actually be comparable to each other - don't
     assume any of those conclusions still hold, but don't assume they're wrong either,
     they were just never measurable before.
+16. **`att_yaw`'s `kp` was genuinely too weak (1.5), independent of calibration/gyro
+    bias - confirmed 2026-09-27 via isolated attitude-loop testing (headless Gazebo,
+    `HEADLESS=1 make px4_sitl gz_x500` - GUI now off by default for memory reasons, see
+    below).** The isolated yaw attitude test showed `rate_sp_yaw` staying tiny
+    (0.04-0.09 rad/s, nowhere near the 3.0 `max_rate_yaw` cap) while yaw drifted
+    steadily away from its level target the whole time - not a saturation problem, just
+    a proportionally too-weak response. Ruled out two alternative explanations first:
+    gyro `bias_z` calibrates consistently near-zero (~0.0000-0.0004 across 3 fresh
+    calibration runs - not the cause), and the dwell-only-calibration mag_bias/heading
+    ambiguity theory (see item below) is real but far too small (~0.6° of heading
+    spread across 3 runs) to explain a drift that reached -76°. **Fix**: `att_yaw` kp
+    1.5->4.0. Confirmed via `run_attitude_test.sh yaw 0.2 3.0`: yaw now peaks around
+    -0.5 rad and recovers/converges back toward level by t=2.82s, instead of running
+    away to -1.3+ rad and tumbling. A 20s full-cascade `pos_xy=0` sanity run afterward
+    showed no regression (roll/pitch mostly under ~10°, no saturation lockup).
+17. **The dwell-only-calibration mag_bias/heading ambiguity flagged in "What's NOT
+    resolved" as "probably low priority" is real, but confirmed too small to be a
+    primary driver of anything seen so far.** Added a one-time `CAL_DIAG` print (still
+    in `FINAL_gps.py`'s `__init__`, same convention as `EKF_ACCEL`/`EKF_MAG`) logging
+    `bias_z`/`mag_bias`/calibrated yaw. Across 3 fresh calibration runs: `mag_bias_z`
+    ranged 0.825-0.904 (~9-10% spread), calibrated yaw ranged -0.685° to -0.050° (~0.6°
+    spread). Real and worth fixing eventually (see "Recommended next steps"), but too
+    small to explain the yaw drift item #16 above describes - don't re-reach for this
+    explanation for a large drift/divergence without first checking whether it's really
+    this small, consistent effect or something bigger.
 
 ## What's NOT resolved
 
-- **CURRENT blocker (updated 2026-09-27, supersedes the paragraph below): with
-  `pos_xy=0`, the full cascade (velocity->attitude->rate) now flies genuinely stable -
-  survived a full 20s test, roll/pitch under ~6 degrees almost throughout, no tumble.
-  The blocker now is specifically that ANY nonzero `pos_xy` gain (tried kp=1.0/kd=0.5
-  AND a much gentler kp=0.15/kd=0.0) reproducibly excites a real resonance and tumbles
-  the vehicle around t=4.3-5.1s.** See the 2026-09-27 session section at the top of
-  this file and the comment on `pos_xy` in `run_sim.py`'s `GAINS` for full detail. Key
-  evidence: the `EKF_ACCEL` diagnostic shows a smoothly growing/oscillating accel
-  deviation (0.4->1.0+ m/s², cyclic over about a second) building right up to each
-  tumble - a real physical oscillation, not corrupted sensor data (compare to the
-  already-fixed corruption bug's signature: isolated 400+ m/s² single-tick spikes, not
-  a smooth build-up). Since this reproduces at TWO very different `pos_xy` magnitudes,
-  the problem is most likely insufficient damping margin somewhere in the inner
-  velocity/attitude/rate cascade (it can currently only just barely stay stable with
-  NO outer-loop disturbance at all), not the specific `pos_xy` gain chosen. Concretely
-  unexplored: whether the resonance is roll/pitch-dominated, yaw-dominated, or both
-  (the one tumble inspected closely had large rate spikes on both roll AND yaw -
-  20-30 rad/s each) - worth a closer look at which axis leads next time before
-  guessing at more gain changes.
+- **CURRENT blocker (updated 2026-09-27, 3 trials now - supersedes/extends the
+  paragraph below): the `att_yaw` kp fix (1.5->4.0) is real, independently confirmed
+  correct in isolation, and it DOES help - but it does NOT reliably fix the `pos_xy`
+  resonance.** Three full-cascade `pos_xy` trials, identical code/gains, fresh Gazebo
+  restart each time: **t=16.4s** (roll-led, first post-fix trial), **t=5.14s**
+  (roll+pitch spiked together), **t=6.06s** (roll+yaw spiked together, rate hit
+  -8.3/-7.3/-5.4 rad/s on all 3 axes at once). 2 of 3 landed back near the ORIGINAL
+  pre-fix timing (~5s) - the 16.4s result looks like it was the outlier, not
+  evidence of a fix that reliably shifted things. This is the same "single trial
+  isn't proof" lesson this file has documented repeatedly (e.g. item #14's att_rp
+  kd=1.5 trial: t=5.3s once, t=2.9s on an immediate re-run) - don't credit the
+  att_yaw fix with solving this without a larger, more careful trial set, but also
+  don't discard it: it's confirmed correct and beneficial in its own isolated test,
+  it just isn't the (or isn't the only) root cause of the pos_xy resonance.
+  **What IS informative**: the failure signature varies trial to trial - sometimes
+  roll leads, sometimes roll+pitch together, sometimes roll+yaw together - never the
+  same axis combination twice. That inconsistency itself is a clue: this points
+  toward a systemic margin/damping problem shared across the whole attitude/rate
+  cascade (not one specifically-weak loop that a single gain fix closes), most
+  likely the same rotorDrag/velocity-feedback disturbance mechanism already
+  confirmed via the isolated roll attitude-loop test, now free to pick off whichever
+  axis happens to be weakest on a given run once `pos_xy` gives the vehicle enough
+  uncorrected time to build up real velocity. **Concrete next steps, in order of how
+  cheap they are to check:**
+  1. Given the shared mechanism theory, the most direct next experiment is
+     addressing the rotorDrag/velocity-feedback disturbance itself rather than
+     continuing to chase whichever attitude axis is currently weakest: tighten
+     `vel_xy` (currently kp=0.8/ki=0.2/kd=0.6) or lower `max_vel_xy` (currently 5.0)
+     so horizontal velocity never builds up enough to trigger the disturbance in the
+     first place, then re-test `pos_xy` (several trials, not one).
+  2. If that doesn't resolve it, run more `pos_xy` trials (5-10) specifically to
+     characterize the failure-time distribution (mean, spread, which axis leads how
+     often) - needed before crediting or discarding any single future gain change,
+     given how noisy this has proven to be even after the timing-noise root-cause
+     fix from earlier in the day.
+  3. Consider whether the isolated-test harnesses (`test_attitude_loop.py` etc.,
+     which step only one axis at a time) are missing a genuinely two-axis failure
+     mode - the 2 most recent tumbles both involved two axes spiking together, which
+     none of the existing single-axis isolated tests would catch.
+  Original (now historical) paragraph, kept for context: with `pos_xy=0`, the full
+  cascade flew stable for a full 20s test, roll/pitch under ~6 degrees almost
+  throughout, no tumble - but ANY nonzero `pos_xy` gain (kp=1.0/kd=0.5 AND a much
+  gentler kp=0.15/kd=0.0, both tested BEFORE the att_yaw fix) reproducibly excited a
+  resonance and tumbled the vehicle around t=4.3-5.1s. Key evidence at the time: the
+  `EKF_ACCEL` diagnostic showed a smoothly growing/oscillating accel deviation
+  (0.4->1.0+ m/s², cyclic over about a second) building right up to each tumble - a
+  real physical oscillation, not corrupted sensor data (compare to the already-fixed
+  corruption bug's signature: isolated 400+ m/s² single-tick spikes, not a smooth
+  build-up).
   - **Not EKF/sensor corruption** - confirmed twice now, both for the original
     t~1.85s divergence (`EKF_ACCEL` deviation stayed small, <0.04 m/s², through that
     window) and for the new pos_xy-triggered tumbles (deviation grows smoothly, not a
@@ -521,7 +760,33 @@ This took many iterations to get reliable - follow it exactly.
 
 ## Recommended next steps (tune inside-out, one loop at a time)
 
-**Immediate next step as of 2026-09-27**: with the run-to-run noise fixed and
+**Immediate next step as of 2026-09-27 (later in the day, supersedes the paragraph
+below): confirm or rule out the mag_bias/heading-ambiguity hypothesis for the yaw
+drift found via isolated attitude-loop testing (see "Same-day follow-up" above)
+before doing anything else.** This is now the most concrete, well-evidenced lead in
+the whole file - two cheap ways to check it:
+1. Add a one-time print of `self.mag_bias_x/y/z` (and ideally the calibrated q's own
+   yaw) right after calibration completes in `DroneEKF.__init__`, across a few fresh
+   calibration runs - if the converged heading/mag_bias combination varies
+   meaningfully run to run (it should, if genuinely ambiguous per the dwell-only
+   theory), that's strong confirmation.
+2. Or, more directly: implement an actual pre-flight wiggle for the live-bridge
+   calibration path (currently dwell-only - `calibration.calibrate()` already supports
+   a `wiggle_steps` parameter, used by the synthetic path but passed `wiggle_steps=0`
+   for the live-bridge one - see `FINAL_gps.py` around the two `calibrate()` calls).
+   This needs `DroneEKF.__init__` to actually command a real roll/pitch/yaw wiggle via
+   the bridge's `publish_motors()` before settling into the dwell, which it currently
+   has no path to do (calibration only reads sensors, it never controls the vehicle) -
+   a real implementation task, not a one-line change. If the yaw-test symptom
+   disappears with a real wiggle, that confirms the hypothesis outright and fixes it
+   at the same time.
+Do this before returning to `pos_xy` tuning - if this IS the root cause, it likely
+explains (or at least contributes to) the pos_xy resonance too, since a subtly wrong
+heading reference would bias attitude estimation for any sustained flight, not just
+this isolated test.
+
+**Previous next step (still valid once the above is resolved), as of 2026-09-27
+earlier in the day**: with the run-to-run noise fixed and
 `pos_xy=0`, `run_sim.py` is genuinely stable for 20s+ - the position-hold resonance
 (see "CURRENT blocker" above) is now the thing standing between here and real
 station-keeping flight. Before touching `pos_xy`'s gain again:

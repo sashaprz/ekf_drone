@@ -86,7 +86,7 @@ def update_H_mag(predicted_mag, H):
     return H
 
 def calibrate(get_gyro, get_accel, get_mag, dwell_steps=200, wiggle_steps=400, dt=0.01,
-              gravity=1.0, accel_noise_var=0.1, mag_noise_var=0.1):
+              gravity=1.0, accel_noise_var=0.1, mag_noise_var=0.1, mag_ref=(1.0, 0.0, 0.0)):
     """
     Runs dwell_steps + wiggle_steps predict/correct cycles against the given sensor
     readers (no wiggle command is issued here - that has to come from whatever's
@@ -109,6 +109,10 @@ def calibrate(get_gyro, get_accel, get_mag, dwell_steps=200, wiggle_steps=400, d
     assume 1g-normalized accel; pass the caller's actual noise variance (e.g. accel
     noise-std² in the same units as `gravity`) when it isn't, or the filter will be
     badly over/under-confident about how much to trust each reading.
+
+    mag_ref: the world-frame field direction the mag model predicts against - must
+    match the caller's own (see FINAL_gps.py's self._mag_ref). Default is the old
+    horizontal (1,0,0), which the synthetic sensors are built around.
     """
     q = np.array([1.0, 0.0, 0.0, 0.0])
     gyro_bias = np.zeros(3)
@@ -169,7 +173,7 @@ def calibrate(get_gyro, get_accel, get_mag, dwell_steps=200, wiggle_steps=400, d
 
         #mag correction - predicted_mag uses q AFTER the accel correction just applied;
         #residual compares against corrected_mag (bias-subtracted), same pattern as accel
-        predicted_mag = rotate_by_quat(quat_conjugate(q), np.array([1.0, 0.0, 0.0]))
+        predicted_mag = rotate_by_quat(quat_conjugate(q), np.asarray(mag_ref, dtype=float))
         H_mag = update_H_mag(predicted_mag, H_mag)
         K_mag = P @ H_mag.T @ np.linalg.inv(H_mag @ P @ H_mag.T + R_mag)
         residual_mag = corrected_mag - predicted_mag

@@ -57,6 +57,12 @@ class Cascade:
         self._att_sp = np.array([1.0, 0.0, 0.0, 0.0])  # identity quat = level
         self._thrust = 0.0
         self._rate_sp = np.zeros(3)
+        # tilt setpoints from the last velocity_loop() recompute, kept separately from
+        # self._att_sp (which stores the quat form) purely for diagnostics/logging - see
+        # HANDOFF.md's 2026-09-28 note on checking whether roll_sp/pitch_sp saturate
+        # together right before a pos_xy tumble.
+        self._roll_sp = 0.0
+        self._pitch_sp = 0.0
 
         # position loop -> outputs velocity setpoint (m/s)
         self.pos_pid_x = PID(**gains["pos_xy"], output_limits=(-limits["max_vel_xy"], limits["max_vel_xy"]))
@@ -69,9 +75,15 @@ class Cascade:
         self.vel_pid_z = PID(**gains["vel_z"], output_limits=limits["thrust_range"])
 
         # attitude loop -> operates on quaternion error vector components (not euler angles), outputs body rate setpoint (rad/s)
-        self.att_pid_x = PID(**gains["att_rp"], output_limits=(-limits["max_rate"], limits["max_rate"]))
-        self.att_pid_y = PID(**gains["att_rp"], output_limits=(-limits["max_rate"], limits["max_rate"]))
-        self.att_pid_z = PID(**gains["att_yaw"], output_limits=(-limits["max_rate_yaw"], limits["max_rate_yaw"]))
+        # kd is pulled OUT of the PID and applied in attitude_loop() as -kd*gyro_rate
+        # instead (2026-09-30) - see that method's comment for why
+        att_rp = {**gains["att_rp"], "kd": 0.0}
+        att_yaw = {**gains["att_yaw"], "kd": 0.0}
+        self._att_kd = np.array([gains["att_rp"]["kd"], gains["att_rp"]["kd"], gains["att_yaw"]["kd"]])
+        self._att_rate_limits = np.array([limits["max_rate"], limits["max_rate"], limits["max_rate_yaw"]])
+        self.att_pid_x = PID(**att_rp, output_limits=(-limits["max_rate"], limits["max_rate"]))
+        self.att_pid_y = PID(**att_rp, output_limits=(-limits["max_rate"], limits["max_rate"]))
+        self.att_pid_z = PID(**att_yaw, output_limits=(-limits["max_rate_yaw"], limits["max_rate_yaw"]))
 
         # rate loop -> gyro rate error, outputs torque command
         self.rate_pid_roll = PID(**gains["rate_rp"], output_limits=limits["torque_range_rp"])
@@ -145,10 +157,22 @@ class Cascade:
         # so kd finally damps how fast that error is changing, same role it plays in
         # rate_loop/velocity_loop/position_loop (which all pass a real, changing
         # measurement already - this was the one loop that didn't).
-        rate_roll_sp = self.att_pid_x.update(0.0, -err_roll, dt)
-        rate_pitch_sp = self.att_pid_y.update(0.0, -err_pitch, dt)
-        rate_yaw_sp = self.att_pid_z.update(0.0, -err_yaw, dt)
-        return np.array([rate_roll_sp, rate_pitch_sp, rate_yaw_sp])
+        #
+        # D-term moved to the gyro, 2026-09-30. The fix above made kd live, but since
+        # measurement=-err CONTAINS the setpoint, derivative-on-measurement here is really
+        # derivative-on-error: every att_sp change (each 75Hz velocity_loop recompute, and
+        # especially a GPS-driven velocity jump) becomes a derivative kick - seen as
+        # rate_sp leaping to 2-3 rad/s with no matching change in attitude
+        # (framefix_Q_trial1.log t=0.83/1.43). With a fixed setpoint d(err)/dt is just
+        # the body rate (err is the half-angle quat vector, so ~ -rate/2), so damping on
+        # the measured gyro rate gives the same damping without the kick - the standard
+        # "D on measurement" intent, done with the actual measurement.
+        rate_sp = np.array([
+            self.att_pid_x.update(0.0, -err_roll, dt),
+            self.att_pid_y.update(0.0, -err_pitch, dt),
+            self.att_pid_z.update(0.0, -err_yaw, dt),
+        ]) - self._att_kd * np.asarray(state["rate"]) / 2.0
+        return np.clip(rate_sp, -self._att_rate_limits, self._att_rate_limits)
 
     def rate_loop(self, rate_setpoint, state, dt):
         # rate error -> torque command (roll_tau, pitch_tau, yaw_tau)
@@ -170,6 +194,7 @@ class Cascade:
         self._elapsed["velocity"] += dt
         if self._elapsed["velocity"] >= self._periods["velocity"]:
             roll_sp, pitch_sp, self._thrust = self.velocity_loop(self._vel_sp, state, self._elapsed["velocity"])
+            self._roll_sp, self._pitch_sp = roll_sp, pitch_sp
             self._att_sp = euler_to_quat(roll_sp, pitch_sp, setpoint["yaw"])
             self._elapsed["velocity"] = 0.0
 

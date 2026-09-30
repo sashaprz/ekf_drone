@@ -7,15 +7,34 @@ from gz.msgs10.imu_pb2 import IMU
 from gz.msgs10.magnetometer_pb2 import Magnetometer
 from gz.msgs10.navsat_pb2 import NavSat
 from gz.msgs10.actuators_pb2 import Actuators
+from gz.msgs10.pose_v_pb2 import Pose_V
 
 # topic/model names match the x500 SITL default world - see `gz topic -l` while
 # `make px4_sitl gz_x500` is running
 IMU_TOPIC = "/world/default/model/x500_0/link/base_link/sensor/imu_sensor/imu"
 MAG_TOPIC = "/world/default/model/x500_0/link/base_link/sensor/magnetometer_sensor/magnetometer"
 GPS_TOPIC = "/world/default/model/x500_0/link/base_link/sensor/navsat_sensor/navsat"
+POSE_TOPIC = "/world/default/pose/info"  # ground truth, diagnostics ONLY - never fed to the EKF/controller
 MOTOR_TOPIC = "/x500_0/command/motor_speed"  # NOT /model/x500_0/... - that one exists but has zero real subscribers
 
-EARTH_RADIUS = 6371000.0  # meters - flat-earth approximation for lat/lon -> local NED, fine over the small distances a sim flight covers
+EARTH_RADIUS = 6371000.0  # meters - flat-earth approximation for lat/lon -> local ENU, fine over the small distances a sim flight covers
+
+# 2026-09-30: the EKF's world frame is now Gazebo's own world frame, ENU (X=east,
+# Y=north, Z=up - see default.sdf's <world_frame_orientation>). The x500 spawns facing
+# +X, so yaw=0 still means "facing the way it spawned", same as before.
+#
+# Mag reference = the field direction gz-sim actually uses in that world frame,
+# MEASURED against ground truth rather than derived from real-world physics: rotating
+# every raw mag reading by the true attitude (sensors_live1.csv, first 14s of a flight
+# with up to 30deg tilt and 35deg of yaw) gives the same world vector every tick,
+# std 0.001 per axis. It points east-and-UP, which is not Earth's real field at Zurich
+# (north-and-down) - the gz-sim quirk PX4's bridge comments on - but what matters to
+# the EKF is only that it's consistent with how the raw reading rotates, and it is.
+# FINAL_gps.py used to hardcode horizontal (1,0,0), so the +0.89 vertical part got
+# absorbed into mag_bias_z (every CAL_DIAG run: mag_bias_z ~0.83-0.90) - fine while
+# level, but a body-fixed bias can't follow a world-fixed vector as the vehicle tilts,
+# so every tilt leaked into bogus heading/attitude corrections.
+MAG_REFERENCE_ENU = (0.450, 0.020, 0.893)
 
 
 class GazeboBridge:
@@ -31,6 +50,8 @@ class GazeboBridge:
         self._gyro = (0.0, 0.0, 0.0)
         self._accel = (0.0, 0.0, 0.0)
         self._mag = (1.0, 0.0, 0.0)
+        # world-frame field direction for FINAL_gps.py's mag model - see MAG_REFERENCE_ENU
+        self.mag_reference = MAG_REFERENCE_ENU
         self._gps = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
 
         # local-frame origin, set from the first GPS fix received (matches
@@ -42,6 +63,12 @@ class GazeboBridge:
         self._node.subscribe(IMU, IMU_TOPIC, self._on_imu)
         self._node.subscribe(Magnetometer, MAG_TOPIC, self._on_mag)
         self._node.subscribe(NavSat, GPS_TOPIC, self._on_gps)
+        # ground truth (2026-09-30): Gazebo's world frame is ENU and the model link is FLU
+        # - the same frames the EKF now uses - so this is directly comparable to
+        # state['quat']/state['pos']. For logging only.
+        self._true_quat = None
+        self._true_pos = None
+        self._node.subscribe(Pose_V, POSE_TOPIC, self._on_pose)
         self._motor_pub = self._node.advertise(MOTOR_TOPIC, Actuators)
 
     def _on_imu(self, msg):
@@ -80,6 +107,13 @@ class GazeboBridge:
         self._imu_event.set()
 
     def _on_mag(self, msg):
+        # Raw passthrough - the reading IS already body-frame FLU, same as the IMU
+        # (verified against ground truth, see MAG_REFERENCE_ENU). 2026-09-30 note: an
+        # earlier attempt the same day remapped this as (-y, x, -z), following PX4's
+        # GZBridge.cpp comment that gz's mag is "left handed". That was wrong for this
+        # use - it produced a mirrored vector whose yaw moved OPPOSITE to the true yaw
+        # in flight (true yaw -5 -> +18deg while the estimate went 0 -> -14deg). PX4's
+        # remap is about its own FRD/NED conventions, not a body-frame reflection.
         v = np.array([msg.field_tesla.x, msg.field_tesla.y, msg.field_tesla.z])
         norm = np.linalg.norm(v)
         if norm > 0:
@@ -97,7 +131,23 @@ class GazeboBridge:
         east = math.radians(msg.longitude_deg - self._home_lon) * EARTH_RADIUS * math.cos(lat_rad)
         up = msg.altitude - self._home_alt
 
-        self._gps = (north, east, up, msg.velocity_north, msg.velocity_east, msg.velocity_up)
+        # ENU order (x=east, y=north), 2026-09-30 - was (north, east, up). The EKF's x
+        # axis is whatever the vehicle faced at spawn (east in Gazebo's ENU world), so
+        # (north, east) swapped x/y. A swap is a mirror, not a rotation: position/
+        # velocity feedback through it is negative along one diagonal but POSITIVE
+        # along the other - a good fit for "any nonzero pos_xy gain tumbles it".
+        self._gps = (east, north, up, msg.velocity_east, msg.velocity_north, msg.velocity_up)
+
+    def _on_pose(self, msg):
+        for p in msg.pose:
+            if p.name == "x500_0":
+                self._true_quat = (p.orientation.w, p.orientation.x, p.orientation.y, p.orientation.z)
+                self._true_pos = (p.position.x, p.position.y, p.position.z)
+                break
+
+    def get_true_pose(self):
+        # (quat [w,x,y,z], pos) or (None, None) before the first message
+        return self._true_quat, self._true_pos
 
     def wait_for_imu(self, timeout=0.1):
         # 2026-09-27: every control loop (run_sim.py, test_*_loop.py) used to call

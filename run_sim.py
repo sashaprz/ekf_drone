@@ -68,9 +68,27 @@ GAINS = {
     # HANDOFF.md), not at pos_xy's own gain value. Back to 0 until that margin is
     # established; re-attempting pos_xy at ANY gain before then is expected to
     # reproduce this same failure.
-    "pos_xy": {"kp": 0.0, "ki": 0.0, "kd": 0.0},
-    "pos_z":  {"kp": 1.5, "ki": 0.0, "kd": 0.3},
-    "vel_xy": {"kp": 0.8, "ki": 0.2, "kd": 0.6, "integral_limits": (-5.0, 5.0)},
+    # RE-TESTING 2026-09-27 at kp=0.15/kd=0.0 (the same gentle value that still
+    # tumbled at t=5.10s before) now that att_yaw's kp has been raised 1.5->4.0 (see
+    # that comment) - isolated attitude-loop testing showed insufficient att_yaw
+    # authority was a real, separate bug, independent of pos_xy. Testing whether that
+    # was also the pos_xy resonance's root cause.
+    "pos_xy": {"kp": 0.15, "ki": 0.0, "kd": 0.0},
+    # pos_z/vel_z re-tuned 2026-09-30 from the actual plant gain instead of by feel:
+    # d(accel)/d(omega) = 8*motorConstant*omega_hover/mass ~= 0.026 m/s^2 per rad/s of
+    # trim, so vel_z kp=15 was a ~0.4 rad/s inner loop sitting UNDER a faster pos_z
+    # (kp=1.5) - a textbook slow outer-loop oscillation. Confirmed in ORACLE mode
+    # (oracle_trial1.log: attitude dead level for 38s, altitude swinging 0<->4m every
+    # ~6s, touching the ground) and reproduced by a 1-D sim of this exact loop
+    # structure (old gains: peak 4.0m, 2.4m p-p sustained). New: vel_z kp=100 (~2.6
+    # rad/s) with ki well below it, pos_z kp=1.0 below that - 1-D sim: 2.0m, ~4cm
+    # overshoot, no sustained oscillation.
+    "pos_z":  {"kp": 1.0, "ki": 0.0, "kd": 0.0},
+    # d_filter_alpha added 2026-09-30 - kd differentiates the EKF's velocity estimate,
+    # which steps at every 5Hz GPS correction; unfiltered, one 0.1 m/s step over a 75Hz
+    # tick is ~7.5 m/s^2 * 0.6 = a full-scale accel command -> tilt_sp slammed to
+    # +/-15deg on both axes at once (run_sim_tiltsp_trial1.log t=1.42).
+    "vel_xy": {"kp": 0.8, "ki": 0.2, "kd": 0.6, "integral_limits": (-5.0, 5.0), "d_filter_alpha": 0.2},
     # cut further (40/60 -> 15/20) - across three runs now, instability tracked with
     # how fast/high thrust ramped up, not a fixed threshold - a gentler climb gives
     # attitude/rate loops room to keep up instead of fighting a fast-moving baseline
@@ -83,7 +101,7 @@ GAINS = {
     # thrust only reached ~153 after 2s without the feedforward, vehicle fell >3.5m).
     # Range is asymmetric to match real headroom around the 757 baseline (757-400=357
     # min, 757+240=997 max, both comfortably inside the real 0-1000 motor range).
-    "vel_z":  {"kp": 15.0, "ki": 20.0, "kd": 0.0, "integral_limits": (-400.0, 240.0)},
+    "vel_z":  {"kp": 100.0, "ki": 25.0, "kd": 0.0, "integral_limits": (-16.0, 10.0)},
     # ki added - logged data showed a slow, steady attitude drift (not oscillation) even
     # with pos_xy/vel_xy disabled: a pure-P attitude loop can't cancel a sustained
     # disturbance (motor spin-up/down asymmetry, gyroscopic coupling, etc), it just
@@ -122,7 +140,15 @@ GAINS = {
     # time (7.8->21.9->oscillating). att_yaw's kp:kd ratio was 30:1 (1.5:0.05) vs
     # att_rp's now much more damped 4:1 (6.0:1.5) - brought into a similar proportion
     # (1.5:0.3 = 5:1). Not yet tested.
-    "att_yaw": {"kp": 1.5, "ki": 0.3, "kd": 0.3, "integral_limits": (-1.0, 1.0), "d_filter_alpha": 0.2},
+    # kp raised 1.5->4.0, 2026-09-27 - the isolated attitude-loop yaw test
+    # (HANDOFF.md "Same-day follow-up") showed rate_sp_yaw staying tiny (0.04-0.09
+    # rad/s, nowhere near the 3.0 cap) while yaw_tilt drifted steadily away from its
+    # level target the whole time - att_yaw wasn't saturating, it just wasn't
+    # commanding enough correction relative to whatever real disturbance was pulling
+    # yaw away (gyro_bias_z and calibration ambiguity both checked and ruled out as
+    # too small to explain it - see HANDOFF.md). Plenty of headroom before hitting
+    # max_rate_yaw, so raising kp is a direct, well-justified first test.
+    "att_yaw": {"kp": 4.0, "ki": 0.3, "kd": 0.3, "integral_limits": (-1.0, 1.0), "d_filter_alpha": 0.2},
     # rate_rp's old kp=150 turned even a fractional rad/s rate error into a torque
     # command that immediately saturated the +/-250 limit - bang-bang, not smooth
     # control, and almost certainly what flipped it. Cut ~10x as a first pass.
@@ -160,7 +186,16 @@ LIMITS = {
     # comment and vel_z's GAINS comment above for why this changed, 2026-09-26)
     "thrust_range": (-400.0, 240.0),
     "motor_range": (0.0, 1000.0),       # matches x500's maxRotVelocity
-    "max_vel_xy": 5.0, "max_vel_z": 3.0, "max_accel_xy": 5.0, "max_rate_yaw": 3.0,
+    # max_vel_xy cut 5.0->1.5, 2026-09-28 - the 3 post-att_yaw-fix pos_xy trials
+    # (HANDOFF.md "CURRENT blocker") failed on a different axis combo each time
+    # (roll alone, roll+pitch, roll+yaw) - no single weak attitude/rate loop, a
+    # shared damping-margin gap the rotorDrag/velocity-feedback torque (already
+    # confirmed via the isolated roll-attitude test) can exploit on whichever axis
+    # is weakest that run. Capping how much horizontal velocity can ever build
+    # bounds that disturbance torque directly, regardless of vel_xy's own reaction
+    # speed - a more direct lever than retuning vel_xy's gains. vel_xy gains left
+    # untouched so this is a single-variable test.
+    "max_vel_xy": 1.5, "max_vel_z": 3.0, "max_accel_xy": 5.0, "max_rate_yaw": 3.0,
     "torque_range_rp": (-100.0, 100.0),   # down from +/-250, omega perturbation not physical torque
     "torque_range_yaw": (-100.0, 100.0),
 }
@@ -180,6 +215,36 @@ def quat_to_euler_deg(q):
     return math.degrees(roll), math.degrees(pitch), math.degrees(yaw)
 
 
+def true_str(bridge):
+    # Gazebo ground truth next to the estimate - see GazeboBridge.get_true_pose()
+    tq, tp = bridge.get_true_pose()
+    if tq is None:
+        return ""
+    r, p, y = quat_to_euler_deg(tq)
+    return f" TRUE rpy=({r:6.1f},{p:6.1f},{y:6.1f}) pos=({tp[0]:5.2f},{tp[1]:5.2f},{tp[2]:5.2f})"
+
+
+# Diagnostics, 2026-09-30 - both default off, so a plain `python3 run_sim.py` is unchanged.
+# ORACLE=1: the controller flies on Gazebo's TRUE attitude/position (+ GPS velocity,
+#   + raw gyro) instead of the EKF's estimate - the EKF still runs alongside and is
+#   logged, but nothing reads it. Separates "controller can't fly" from "estimator is
+#   lying to the controller", which were impossible to tell apart from a crash log.
+# SENSOR_LOG=path.csv: every tick's raw gyro/accel/mag/gps + ground truth, so the EKF
+#   can be replayed offline against truth (replay_ekf.py) in seconds instead of
+#   minutes-per-Gazebo-crash.
+ORACLE = os.environ.get("ORACLE") == "1"
+SENSOR_LOG = os.environ.get("SENSOR_LOG")
+
+
+def oracle_state(bridge, ekf_state):
+    tq, tp = bridge.get_true_pose()
+    if tq is None:
+        return ekf_state
+    gps = bridge.get_gps()
+    return {"quat": np.array(tq), "pos": np.array(tp), "vel": np.array(gps[3:6]),
+            "rate": np.array(bridge.get_gyro())}
+
+
 def main():
     bridge = GazeboBridge()
     time.sleep(0.5)  # let the first real gz-transport messages arrive before calibration reads them -
@@ -189,6 +254,12 @@ def main():
 
     setpoint = {"pos": np.array([0.0, 0.0, 2.0]), "yaw": 0.0}  # climb to 2m and hold
 
+    log = open(SENSOR_LOG, "w") if SENSOR_LOG else None
+    if log:
+        log.write("t,gx,gy,gz,ax,ay,az,mx,my,mz,px,py,pz,vx,vy,vz,tqw,tqx,tqy,tqz,tpx,tpy,tpz\n")
+    if ORACLE:
+        print("ORACLE MODE - controller is flying on Gazebo ground truth, not the EKF", flush=True)
+
     last_t = time.time()
     start_t = last_t
     i = 0
@@ -196,8 +267,16 @@ def main():
     while True:
         bridge.wait_for_imu()  # paces the loop to real sensor arrival - see that method's comment
         state = ekf.step()
+        est_state = state
+        if ORACLE:
+            state = oracle_state(bridge, est_state)
 
         now = time.time()
+        if log:
+            tq, tp = bridge.get_true_pose()
+            tq, tp = tq or (1.0, 0.0, 0.0, 0.0), tp or (0.0, 0.0, 0.0)
+            row = (now, *bridge.get_gyro(), *bridge.get_accel(), *bridge.get_mag(), *bridge.get_gps(), *tq, *tp)
+            log.write(",".join(f"{v:.6f}" for v in row) + "\n")
         dt = min(now - last_t, MAX_DT)
         last_t = now
 
@@ -207,14 +286,15 @@ def main():
 
         i += 1
         if i % 30 == 0:
-            roll_deg, pitch_deg, yaw_deg = quat_to_euler_deg(state["quat"])
+            roll_deg, pitch_deg, yaw_deg = quat_to_euler_deg(est_state["quat"])
             print(f"t={now - start_t:6.2f} dt={dt*1000:6.2f}ms "
                   f"est(rpy)=({roll_deg:6.1f},{pitch_deg:6.1f},{yaw_deg:6.1f})deg "
+                  f"tilt_sp=({math.degrees(c._roll_sp):6.1f},{math.degrees(c._pitch_sp):6.1f})deg "
                   f"rate_meas=({state['rate'][0]:5.2f},{state['rate'][1]:5.2f},{state['rate'][2]:5.2f}) "
                   f"rate_sp=({c._rate_sp[0]:5.2f},{c._rate_sp[1]:5.2f},{c._rate_sp[2]:5.2f}) "
                   f"thrust={thrust:6.1f} tau=({roll_tau:6.1f},{pitch_tau:6.1f},{yaw_tau:6.1f}) "
-                  f"pos=({state['pos'][0]:5.2f},{state['pos'][1]:5.2f},{state['pos'][2]:5.2f})",
-                  flush=True)
+                  f"pos=({est_state['pos'][0]:5.2f},{est_state['pos'][1]:5.2f},{est_state['pos'][2]:5.2f})"
+                  + true_str(bridge), flush=True)
 
 
 if __name__ == "__main__":
