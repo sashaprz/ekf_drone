@@ -65,7 +65,15 @@ comments at each site):
   `pos_xy` kp, higher `max_vel_xy` (still 1.5), disturbance rejection. Everything below
   this section predates these fixes - its gain conclusions were drawn against a broken
   estimator and should be re-checked, not trusted.
-- `EKF_MAG` TEMP DIAGNOSTIC in `FINAL_gps.py` still prints every tick - remove when done.
+
+**Cleanup (end of 2026-09-30):** all `*.log` run logs, `sensors_*.csv` recordings and
+`__pycache__/` were deleted from the repo root and are now `.gitignore`d - every log
+named in this file is still recoverable from commit `33be40e`
+(`git show 33be40e:live_trial2.log`, same for `sensors_live1.csv` etc.). The TEMP
+`EKF_MAG`/`EKF_ACCEL`/`CAL_DIAG` prints were removed from `FINAL_gps.py` (resolved;
+replay of `sensors_live1.csv` gives identical error before/after), so run_sim.py output
+no longer needs `grep -v EKF_MAG`. README image links were fixed to point into
+`state estimation/testing/` (broken since the README moved to the root in `6fb184c`).
 
 ## 2026-09-28 session: max_vel_xy cap tested, did NOT fix the pos_xy resonance
 

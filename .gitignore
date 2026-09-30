@@ -1,0 +1,7 @@
+# Python bytecode
+__pycache__/
+*.pyc
+
+# sim run output - run_sim.py / test_*_loop.py logs and SENSOR_LOG recordings
+*.log
+sensors_*.csv

@@ -431,16 +431,6 @@ class DroneEKF:
             self.P[:, 12:18] = 0.0
             self.P[12:18, 12:18] = np.eye(6) * 1e-6
 
-        # TEMP DIAGNOSTIC (2026-09-27) - checking the dwell-only-calibration
-        # mag_bias/heading-ambiguity hypothesis (see HANDOFF.md's "Same-day follow-up"
-        # section): if calibration's converged mag_bias/heading combination varies
-        # meaningfully across fresh runs from what should be the same real sensor
-        # state, that's evidence the ambiguity is real. Remove once resolved.
-        _cal_w, _cal_x, _cal_y, _cal_z = self.q
-        _cal_yaw = math.atan2(2 * (_cal_w * _cal_z + _cal_x * _cal_y), 1 - 2 * (_cal_y * _cal_y + _cal_z * _cal_z))
-        print(f"CAL_DIAG bias_z={self.bias_z:+.5f} mag_bias=({self.mag_bias_x:+.5f},{self.mag_bias_y:+.5f},"
-              f"{self.mag_bias_z:+.5f}) calibrated_yaw={math.degrees(_cal_yaw):+.3f}deg", flush=True)
-
         #timing starts here, AFTER calibration - see the comment above where these used to live
         self.last_time = time.time()
         self.last_gps_time = time.time()
@@ -604,23 +594,8 @@ class DroneEKF:
         S_accel_gate = self.H_accel @ self.P @ self.H_accel.T + self.R_accel_base
         d_squared = residual_accel.T @ np.linalg.inv(S_accel_gate) @ residual_accel
 
-        # TEMP DIAGNOSTIC (2026-09-26) - chasing a sudden single-tick attitude jump seen
-        # in test_attitude_loop.py while state['rate'] (raw gyro, doesn't depend on q)
-        # stays smooth through the same tick - theory is a bad accel correction slipping
-        # through during real (non-hover) acceleration. Remove once resolved.
-        correction_accel = K_accel @ residual_accel
-        if not self.use_accel_correction:
-            pass
-        elif d_squared <= chi2_threshold:
-            print(f"EKF_ACCEL t={now:.6f} FIRED   dev={deviation:.4f} d2={d_squared:8.2f} "
-                  f"thr={chi2_threshold:.2f} dtheta={np.linalg.norm(correction_accel[0:3]):.4f} "
-                  f"dyaw={correction_accel[2]:+.5f}", flush=True)
-        else:
-            print(f"EKF_ACCEL t={now:.6f} REJECTED dev={deviation:.4f} d2={d_squared:8.2f} "
-                  f"thr={chi2_threshold:.2f}", flush=True)
-
         if d_squared <= chi2_threshold and self.use_accel_correction:
-          self.apply_correction(correction_accel)
+          self.apply_correction(K_accel @ residual_accel)
           #this is the second p update, after we incorporate a measuremnt uncertainty goes down bc that is another measurement source
           self.P = (I - K_accel @ self.H_accel) @ self.P @ (I - K_accel @ self.H_accel).T + K_accel @ R_accel @ K_accel.T
         #else: skip entirely - state and P stay exactly as the predict step left them
@@ -637,19 +612,6 @@ class DroneEKF:
         #gate against magnetic interference (motors/ESCs) - R_mag is static, not
         #adaptively inflated like R_accel, so no separate "base" R is needed here
         d_squared_mag = residual_mag.T @ np.linalg.inv(S_mag) @ residual_mag
-
-        # TEMP DIAGNOSTIC (2026-09-27) - chasing the isolated-attitude-loop yaw test's
-        # monotonic yaw drift (ignores commanded setpoint entirely, unlike roll/pitch) -
-        # theory is mag corrections getting rejected once the yaw estimate has drifted
-        # enough that it and the mag reading disagree, a self-reinforcing gate failure.
-        # Remove once resolved.
-        correction_mag = K_mag @ residual_mag
-        if d_squared_mag <= chi2_threshold:
-            print(f"EKF_MAG t={now:.6f} FIRED    d2={d_squared_mag:8.2f} thr={chi2_threshold:.2f} "
-                  f"dtheta={np.linalg.norm(correction_mag[0:3]):.4f} dyaw={correction_mag[2]:+.5f} "
-                  f"gyro_z={corrected_gyro_z:+.4f}", flush=True)
-        else:
-            print(f"EKF_MAG t={now:.6f} REJECTED d2={d_squared_mag:8.2f} thr={chi2_threshold:.2f}", flush=True)
 
         if d_squared_mag <= chi2_threshold:
             self.apply_correction(K_mag @ residual_mag)

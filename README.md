@@ -6,7 +6,7 @@ Attitude and position estimation for a drone from gyro + accelerometer + magneto
 
 ## Static test (fixed 10° tilt, constant 5°/s gyro bias)
 
-![Static test comparison](testing/static_comparison.png)
+![Static test comparison](state%20estimation/testing/static_comparison.png)
 
 | | Complementary filter | EKF (angle-based) | EKF (raw-vector + bias) |
 |---|---|---|---|
@@ -32,7 +32,7 @@ RMS (root-mean-square) error: square each iteration's error, average over the ru
 
 All three filters run against identical trajectory + sensor stream (same RNG seed), fixed `dt`, 20s.
 
-![RMS error comparison](testing/rms_comparison.png)
+![RMS error comparison](state%20estimation/testing/rms_comparison.png)
 
 | Gyro bias | Filter | Roll RMS | Pitch RMS | Yaw RMS |
 |---|---|---|---|---|
@@ -66,8 +66,8 @@ Gating only works because it checks the residual against the *base* noise, not t
 
 Extends the quaternion MEKF's error state to 12 dimensions (adds velocity + position), predicting from gravity-compensated world-frame acceleration and correcting with GPS position + velocity gated to a realistic ~5Hz, instead of every IMU tick.
 
-![GPS tracking trajectory](testing/gps_tracking_trajectory.png)
-![GPS tracking RMS comparison](testing/gps_tracking_rms.png)
+![GPS tracking trajectory](state%20estimation/testing/gps_tracking_trajectory.png)
+![GPS tracking RMS comparison](state%20estimation/testing/gps_tracking_rms.png)
 
 GPS cuts position error 8-10x across the board; a 10°-tilted version of each scenario matches these numbers exactly, confirming `update_F`'s attitude/acceleration coupling handles a non-identity attitude correctly.
 
