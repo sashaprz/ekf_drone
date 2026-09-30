@@ -51,7 +51,7 @@ comments at each site):
   controller problems from estimator problems. (Oracle hover was perfect once the
   vertical gains were fixed - the controller was never the main problem.)
 - `SENSOR_LOG=x.csv python3 run_sim.py` records raw sensors + truth every tick;
-  `python replay_ekf.py x.csv` replays the EKF offline vs truth in seconds
+  `python testing/replay_ekf.py x.csv` replays the EKF offline vs truth in seconds
   (`T_END=`, `EXP="QATT=.. R_ACC=.. ROLL0=5 ..."` knobs - see the file). NOTE: csvs
   recorded before the mag revert hold remapped mag; replay undoes it by default
   (`MAG_REMAPPED=1`) - pass `MAG_REMAPPED=0` for csvs recorded from now on.
@@ -72,7 +72,10 @@ named in this file is still recoverable from commit `33be40e`
 (`git show 33be40e:live_trial2.log`, same for `sensors_live1.csv` etc.). The TEMP
 `EKF_MAG`/`EKF_ACCEL`/`CAL_DIAG` prints were removed from `FINAL_gps.py` (resolved;
 replay of `sensors_live1.csv` gives identical error before/after), so run_sim.py output
-no longer needs `grep -v EKF_MAG`. README image links were fixed to point into
+no longer needs `grep -v EKF_MAG`. Gazebo test harnesses (`test_*_loop.py`, `test_common.py`, `run_*_test.sh`) and
+`replay_ekf.py` moved from the repo root into `testing/` (logs they write land there
+too, gitignored). `state estimation/testing/` is separate - the EKF's own synthetic
+tests and the README graphs. README image links were fixed to point into
 `state estimation/testing/` (broken since the README moved to the root in `6fb184c`).
 
 ## 2026-09-28 session: max_vel_xy cap tested, did NOT fix the pos_xy resonance
@@ -395,7 +398,7 @@ the `gz sim -s ...` server process runs, not `gz sim -g`.
 5. **Run the test** in a *separate* terminal from the one running `make` (that
    terminal's shell is occupied by the foreground process tree and won't take input):
    ```
-   wsl -d Ubuntu-24.04 -- bash /mnt/c/Users/Sasha/repos/python_drone/run_rate_test.sh roll 1.0 5.0
+   wsl -d Ubuntu-24.04 -- bash /mnt/c/Users/Sasha/repos/python_drone/testing/run_rate_test.sh roll 1.0 5.0
    ```
 6. **If the vehicle diverges badly** (flies far away, flips repeatedly), do a full
    fresh restart (kill both `gz sim` processes too, not just PX4) before the next
@@ -834,7 +837,7 @@ was causing real run-to-run inconsistency).
 clean (no overshoot, no oscillation) once the liftoff fix made the test actually
 airborne and the yaw `kp` fix gave it real authority:
 ```
-bash run_rate_test.sh roll 0.3 5.0     # axis, step size (rad/s), duration (s)
+bash testing/run_rate_test.sh roll 0.3 5.0     # axis, step size (rad/s), duration (s)
 ```
 (default step is now `0.3`, not the old `1.0` - see the comment at the top of
 `test_rate_loop.py` for why: `1.0` held for the standard 1.667s middle-third accumulates
@@ -866,7 +869,7 @@ output IS thrust) - see the WARMUP phase in its own docstring for why, and don't
 `vel_pid_z`'s integral after warmup (only rate/attitude PIDs) or you'll recreate the
 sag the warmup exists to avoid. Usage:
 ```
-bash run_velocity_test.sh vz 0.5 3.0     # axis (vx/vy/vz), step (m/s), duration (s)
+bash testing/run_velocity_test.sh vz 0.5 3.0     # axis (vx/vy/vz), step (m/s), duration (s)
 ```
 Confirmed clean after fixes #7-10: `vz 0.5 3.0` now shows `vx`/`vy` staying bounded and
 settling (not diverging) for a full 3s test, thrust climbing smoothly without

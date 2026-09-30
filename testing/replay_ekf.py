@@ -4,7 +4,7 @@ Feeds a SENSOR_LOG csv (see run_sim.py) through DroneEKF with time.time() patche
 the recorded timestamps, and reports estimate-vs-truth error. Lets EKF changes be
 checked in seconds instead of one Gazebo crash per try.
 
-usage: python replay_ekf.py sensors_oracle1.csv [print_every]
+usage: python testing/replay_ekf.py sensors_oracle1.csv [print_every]
 """
 import sys
 import os
@@ -12,8 +12,11 @@ import math
 import csv
 import numpy as np
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "state estimation"))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "PID"))
+# lives in testing/ - repo root is one level up (for run_sim.py, "state estimation/", "PID/")
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.join(ROOT, "state estimation"))
+sys.path.insert(0, os.path.join(ROOT, "PID"))
 import FINAL_gps
 
 # same value gz_bridge.py hands the EKF - imported by value to avoid needing gz.transport

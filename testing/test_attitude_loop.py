@@ -36,8 +36,11 @@ import os
 import time
 import numpy as np
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "state estimation"))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "PID"))
+# lives in testing/ - repo root is one level up (for run_sim.py, "state estimation/", "PID/")
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.join(ROOT, "state estimation"))
+sys.path.insert(0, os.path.join(ROOT, "PID"))
 
 from FINAL_gps import DroneEKF
 from gz_bridge import GazeboBridge
