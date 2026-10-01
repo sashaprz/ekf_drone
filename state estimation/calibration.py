@@ -149,8 +149,11 @@ def calibrate_dwell(get_gyro, get_accel, get_mag, dwell_steps=200, gravity=9.806
     mag_ref = np.asarray(mag_ref, float) / np.linalg.norm(mag_ref)
     q = triad(a_mean, m_mean, np.array([0.0, 0.0, 1.0]), mag_ref)
 
-    # covariance: prior -> one update with the averaged measurement (residual is ~0 by
-    # construction, so only P changes)
+    # prior -> one Kalman update with the averaged measurement, linearized at the triad
+    # attitude. The accel residual is 0 by construction; the mag residual isn't when the
+    # field's dip disagrees (hard iron, or a tilt that's really accel bias) - applying K*r
+    # splits it between attitude and mag bias the same way P says it should, so the main
+    # filter starts with a state and covariance that agree.
     P = np.zeros((12, 12))
     P[0:3, 0:3] = np.eye(3) * 1.0                                   # attitude: unknown a priori
     P[3:6, 3:6] = np.diag(np.maximum(g.var(0), 1e-12) / n)          # gyro bias: averaging
@@ -158,13 +161,19 @@ def calibrate_dwell(get_gyro, get_accel, get_mag, dwell_steps=200, gravity=9.806
     P[9:12, 9:12] = np.eye(3) * mag_bias_std ** 2
     H = np.zeros((6, 12))
     H_a, H_m = np.zeros((3, 12)), np.zeros((3, 12))
-    H[0:3] = update_H_accel(rotate_by_quat(quat_conjugate(q), np.array([0.0, 0.0, gravity])), H_a)
-    H[3:6] = update_H_mag(rotate_by_quat(quat_conjugate(q), mag_ref), H_m)
+    pred_a = rotate_by_quat(quat_conjugate(q), np.array([0.0, 0.0, gravity]))
+    pred_m = rotate_by_quat(quat_conjugate(q), mag_ref)
+    H[0:3] = update_H_accel(pred_a, H_a)
+    H[3:6] = update_H_mag(pred_m, H_m)
     R = np.diag(np.r_[np.maximum(a.var(0), 1e-8) / n, np.maximum(m.var(0), 1e-10) / n])
     K = P @ H.T @ np.linalg.inv(H @ P @ H.T + R)
+    dx = K @ np.r_[a_mean - pred_a, m_mean - pred_m]
     IKH = np.eye(12) - K @ H
     P = IKH @ P @ IKH.T + K @ R @ K.T
-    return q, gyro_bias, np.zeros(3), np.zeros(3), 0.5 * (P + P.T)
+    d = dx[0:3] / 2
+    q = quat_mult(q, np.array([1.0, *d]))
+    q = q / np.linalg.norm(q)
+    return q, gyro_bias, dx[6:9], dx[9:12], 0.5 * (P + P.T)
 
 
 def calibrate(get_gyro, get_accel, get_mag, dwell_steps=200, wiggle_steps=400, dt=0.01,

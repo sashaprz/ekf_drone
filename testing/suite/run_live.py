@@ -45,7 +45,7 @@ def fly(mission, k):
 
 
 def tracking(cols, truth, mi):
-    prof = (cols["mt"] >= MS.SETTLE_S) & (cols["mt"] <= MS.SETTLE_S + mi.duration)
+    prof = (cols["mt"] >= mi.profile_start) & (cols["mt"] <= mi.profile_start + mi.duration)
     ideal = np.array([mi.ideal(mt)[0] for mt in cols["mt"][prof]])
     e = truth["pos"][prof] - ideal
     eh = np.hypot(e[:, 0], e[:, 1])

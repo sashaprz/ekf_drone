@@ -174,11 +174,15 @@ class Fault:
         return c, info
 
     def _renorm_mag(self, c, m):
-        m = m / np.linalg.norm(m, axis=1, keepdims=True)  # the bridge normalizes the raw field
+        # additive in the bridge's units (raw field / one fixed field strength) - gz_bridge
+        # stopped normalizing each reading 2026-09-30, so a hard iron stays a constant
+        # body-frame offset, as on real hardware. (Suite v1 renormalized here, which made
+        # the offset orientation-dependent - results for mag_bias/mag_interference before
+        # that change aren't comparable.)
         _set_xyz(c, "m", m)
 
     def _mag_bias(self, c, ctx, info, rng=None):
-        # hard iron: fixed body-frame vector added to the raw field (unit-field fraction),
+        # hard iron: fixed body-frame vector added to the field (unit-field fraction),
         # present from power-on (calibration sees it too)
         rng = rng or _rng(self.name, self.seed)
         d = rng.normal(0, 1, 3)
@@ -198,8 +202,7 @@ class Fault:
         amp = self.params["amp"] * np.clip(c["az"] / G, 0, 2) * on
         m = _xyz(c, "m")
         hit = on > 0
-        m[hit] = m[hit] + amp[hit, None] * d
-        m[hit] /= np.linalg.norm(m[hit], axis=1, keepdims=True)  # only the burst rows
+        m[hit] = m[hit] + amp[hit, None] * d  # only the burst rows; additive, see _renorm_mag
         _set_xyz(c, "m", m)
         info["window"] = (ws, we)
         return c, info

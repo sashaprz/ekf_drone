@@ -31,7 +31,7 @@ import faults as F  # noqa: E402
 import metrics as M  # noqa: E402
 import missions as MS  # noqa: E402
 
-SUITE_VERSION = 1
+SUITE_VERSION = 2  # v2: mag faults additive (bridge no longer normalizes mag)
 DATA = os.path.join(ROOT, "testing", "data")
 REF = {"name": "ref_live1", "file": "ref_sensors_live1.csv", "remapped": True, "t_end": 12.0, "dyn_from_t0": 4.0}
 # patrol_long is 10 min (150k rows, ~70 s per replay): by default it runs only the faults
@@ -135,10 +135,10 @@ def fault_context(rec, cols):
     t0 = cols["t"][0]
     if rec["name"] in MS.MISSIONS and "mt" in cols:
         mi = MS.MISSIONS[rec["name"]]
-        k = np.searchsorted(cols["mt"], MS.SETTLE_S + mi.dynamic_start)
+        k = np.searchsorted(cols["mt"], mi.profile_start + mi.dynamic_start)
         dyn_t = cols["t"][min(k, len(cols["t"]) - 1)]
         if rec.get("t_end") is not None:  # truncated: windows start at the profile start instead
-            dyn_t = cols["t"][min(np.searchsorted(cols["mt"], MS.SETTLE_S), len(cols["t"]) - 1)]
+            dyn_t = cols["t"][min(np.searchsorted(cols["mt"], mi.profile_start), len(cols["t"]) - 1)]
     else:
         dyn_t = t0 + REF["dyn_from_t0"]
     return {"t0": t0, "dyn_t": dyn_t}

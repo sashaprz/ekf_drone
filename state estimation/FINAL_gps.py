@@ -99,7 +99,7 @@ gps_period = 0.2
 # what a cheap IMU / compass has left after factory calibration. They set how uncertain
 # tilt and heading start (tilt ~ accel std / g ~ 0.3deg; heading ~ mag std / horizontal
 # field ~ 6deg in Gazebo's field) until in-flight rotation separates bias from attitude.
-ACCEL_BIAS_PRIOR_STD = 0.05   # m/s^2
+ACCEL_BIAS_PRIOR_STD = 0.005  # m/s^2
 MAG_BIAS_PRIOR_STD = 0.02     # fraction of the unit field
 GPS_LOCKOUT_RESETS = 5  # consecutive gate rejections (~1s at gps_period) before resetting pos/vel to GPS
 # mag lockout recovery, 2026-09-30 (EKF_TEST_REPORT.md F2): the mag gate had no way back -
@@ -466,6 +466,14 @@ class DroneEKF:
             # where the biases are unobservable, updates leave them alone; once the vehicle
             # rotates they're learned together with the attitude they were confused with.
             self.Q[12:18, 12:18] = np.eye(6) * 1e-12
+            # accel bias stays PINNED (no correlation with attitude): unpinned with a 0.05
+            # prior it diverged at hover (to 0.75 m/s^2, yaw -16deg - tilt*g vs bias rotated
+            # by yaw is too weakly observable), and even a 0.005 prior WITH its calibration
+            # correlation let an in-flight bias shift leak into heading (yaw 2.6 -> 10deg).
+            # Only the mag bias is learned in flight (that's what the calibration turn is for).
+            self.P[12:15, :] = 0.0
+            self.P[:, 12:15] = 0.0
+            self.P[12:15, 12:15] = np.eye(3) * 1e-6
 
         #timing starts here, AFTER calibration - see the comment above where these used to live
         self.last_time = time.time()

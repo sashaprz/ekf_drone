@@ -315,7 +315,7 @@ def main():
     if MISSION:
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), "testing", "suite"))
         import missions
-        mission = missions.get(MISSION, GAINS)
+        mission = missions.get(MISSION, GAINS, cal_turn=os.environ.get("CAL_TURN") == "1")
         print(f"MISSION {MISSION}: {mission.desc} - exits at t={mission.total:.0f}s "
               f"(max_vel_xy={limits['max_vel_xy']}, max_tilt={math.degrees(limits['max_tilt_rad']):.0f}deg)", flush=True)
 

@@ -50,6 +50,7 @@ class GazeboBridge:
         self._gyro = (0.0, 0.0, 0.0)
         self._accel = (0.0, 0.0, 0.0)
         self._mag = (1.0, 0.0, 0.0)
+        self._mag_scale = None  # field strength of the first reading - see _on_mag
         # world-frame field direction for FINAL_gps.py's mag model - see MAG_REFERENCE_ENU
         self.mag_reference = MAG_REFERENCE_ENU
         self._gps = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
@@ -114,10 +115,20 @@ class GazeboBridge:
         # use - it produced a mirrored vector whose yaw moved OPPOSITE to the true yaw
         # in flight (true yaw -5 -> +18deg while the estimate went 0 -> -14deg). PX4's
         # remap is about its own FRD/NED conventions, not a body-frame reflection.
+        #
+        # Scaled by ONE fixed field strength (latched from the first reading), not
+        # normalized per reading, 2026-09-30. A hard-iron offset is additive in the raw
+        # field; normalizing every reading turns it into an offset that changes with
+        # orientation, which the EKF's constant mag_bias state can't learn - in replay, a
+        # 0.05 hard iron was learned exactly during a yaw turn when scaled, and not at all
+        # when normalized (EKF_TEST_REPORT.md, in-flight calibration). Gazebo's field
+        # strength is constant, so with no hard iron this is identical to normalizing.
         v = np.array([msg.field_tesla.x, msg.field_tesla.y, msg.field_tesla.z])
         norm = np.linalg.norm(v)
-        if norm > 0:
-            v = v / norm
+        if norm > 0 and self._mag_scale is None:
+            self._mag_scale = norm
+        if self._mag_scale:
+            v = v / self._mag_scale
         self._mag = tuple(v)
 
     def _on_gps(self, msg):

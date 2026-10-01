@@ -165,7 +165,7 @@ def check_recordings(names, lines):
         eu = M.quat_to_euler_deg(tr["q"])
         tilt = np.degrees(np.arccos(np.clip(1 - 2 * (tr["q"][:, 1] ** 2 + tr["q"][:, 2] ** 2), -1, 1)))
         z = tr["pos"][:, 2]
-        prof = (cols["mt"] >= MS.SETTLE_S) & (cols["mt"] <= MS.SETTLE_S + mi.duration)
+        prof = (cols["mt"] >= mi.profile_start) & (cols["mt"] <= mi.profile_start + mi.duration)
         up = np.flatnonzero(z > 0.3)
         air = (t >= t[up[0]] + 2) if len(up) else np.zeros(len(t), bool)
         spd = np.hypot(tr["vel"][:, 0], tr["vel"][:, 1])

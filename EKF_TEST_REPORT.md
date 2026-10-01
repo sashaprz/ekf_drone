@@ -331,6 +331,33 @@ judge pos/vel consistency on `gpsN`/`REAL` rows only (they read 0.7–2.2).
 >   0.3-amplitude interference got through the dip-angle guard (tilt 0.7 -> 10-14 deg) and
 >   calibration-caused lockouts got worse (circle_fast imu_noise 9 -> 26 deg). Revisit after F1.
 
+> **In-flight calibration — IMPLEMENTED 2026-10-01** (owner's go-ahead; fixes F1, most of F2/F3).
+> - `calibration.calibrate_dwell` (live mode): averages the dwell, attitude from the two mean
+>   vectors (triad: gravity exact, mag for heading only), and a covariance from one Kalman
+>   update of a finite bias prior. It keeps the tilt↔accel-bias and heading↔mag-bias links in P
+>   instead of resolving them at random. Priors `ACCEL_BIAS_PRIOR_STD` 0.005,
+>   `MAG_BIAS_PRIOR_STD` 0.02 (a bench-calibrated compass).
+> - Mag bias **unpinned**: learned in flight once the body rotates. Accel bias **stays pinned**:
+>   unpinned it diverged at hover (0.75 m/s², yaw −16°), and with its calibration link an
+>   in-flight bias shift leaked into heading.
+> - `gz_bridge.py` scales mag by one latched field strength instead of normalizing each
+>   reading. Normalizing made a hard iron orientation-dependent, so it was unlearnable. Suite
+>   v2 injects mag faults additively to match.
+> - `missions.py`: optional **calibration turn** (smooth 360° yaw over 12 s + 3 s hold after the
+>   settle hover). `hover_ct`/`box_ct` missions, or `CAL_TURN=1` for any mission.
+> - Results (`testing/results/candidate_calturn/`, vs the stall-fix and the original baseline):
+>   grades excl. NEES 76/139/52 → **216/32/19** (P/W/F); median tilt 0.72 → **0.05°**, heading
+>   2.33 → **0.12°**; GPS resets 169 → 76. circle_fast `combined_realistic` 27° max → 1.5°
+>   (PASS). Hard iron 0.05 / 0.15 after the turn: heading **0.11° / 1.1°** (3.5° / 10° without).
+> - Live (`testing/results/live_calturn/TIERB.md`, 3 trials each, all survived): hover true
+>   position error 0.25 → **0.01 m**, est tilt 0.64 → 0.01°, heading 5.75 → 0.02°; hover_ct /
+>   box_ct heading 0.06–0.07°.
+> - Known remaining: (a) without a turn, heading is honestly uncertain and model errors at
+>   hover can move it (in-flight accel-bias jump: 6.5° heading, pos 0.43 m; was 2.6°/0.19 m);
+>   (b) stale-GPS recovery 1–2 s → 3.5–5.5 s (WARN); (c) attitude NEES now ≪1 everywhere: the
+>   filter is *under*confident now that errors are ~0.02°, so the live attitude Q (1e-7) is
+>   the next thing to look at.
+
 ## 5. Symptom → cause lookup (extended)
 
 | Symptom | Likely cause | Knob / change to consider |

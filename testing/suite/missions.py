@@ -22,6 +22,12 @@ import numpy as np
 
 SETTLE_S = 10.0
 END_HOLD_S = 5.0
+# in-flight calibration turn (2026-09-30): after the settle hover, one smooth 360deg yaw
+# (CAL_TURN_S, peak ~45 deg/s) then CAL_HOLD_S of hover, before the profile starts. A
+# dwell on the ground can't separate heading from mag bias; rotating the body under the
+# fixed earth field does - the EKF learns the hard iron during the turn (EKF_TEST_REPORT.md).
+CAL_TURN_S = 12.0
+CAL_HOLD_S = 3.0
 ALT = 2.0
 
 # defaults = run_sim.py GAINS at the time of writing; run_sim passes the live values in
@@ -30,7 +36,8 @@ DEFAULT_LEAD_ACCEL = (1 + 0.6) / 0.8
 
 
 class Mission:
-    def __init__(self, name, duration, path, *, dynamic_start, aggressive=False, hypotheses=(), desc=""):
+    def __init__(self, name, duration, path, *, dynamic_start, aggressive=False, hypotheses=(), desc="",
+                 cal_turn=False):
         # path(tau) -> (p, v, a, yaw) in profile time tau in [0, duration]
         self.name = name
         self.duration = duration
@@ -41,17 +48,26 @@ class Mission:
         self.desc = desc
         self.kp_pos = DEFAULT_KP_POS
         self.lead_accel = DEFAULT_LEAD_ACCEL
+        self.cal_turn = cal_turn
+
+    @property
+    def profile_start(self):
+        # seconds from loop start until the mission profile begins
+        return SETTLE_S + ((CAL_TURN_S + CAL_HOLD_S) if self.cal_turn else 0.0)
 
     @property
     def total(self):
         # seconds from loop start until run_sim.py exits
-        return SETTLE_S + self.duration + END_HOLD_S
+        return self.profile_start + self.duration + END_HOLD_S
 
     def ideal(self, t):
         # the intended trajectory (no lead) - for validation/plots
-        tau = t - SETTLE_S
+        tau = t - self.profile_start
         if tau < 0:
-            return np.array([0.0, 0.0, ALT]), np.zeros(3), np.zeros(3), 0.0
+            yaw = 0.0
+            if self.cal_turn and t >= SETTLE_S:
+                yaw = 2 * math.pi * _smoothstep((t - SETTLE_S) / CAL_TURN_S)
+            return np.array([0.0, 0.0, ALT]), np.zeros(3), np.zeros(3), yaw
         p, v, a, yaw = self.path(min(tau, self.duration))
         if tau > self.duration:
             v, a = np.zeros(3), np.zeros(3)
@@ -170,12 +186,20 @@ MISSIONS = {
                             desc="hover, land, sit, re-takeoff"),
 }
 
+# same missions with the in-flight calibration turn first
+MISSIONS["hover_ct"] = Mission("hover_ct", 60, _hold, dynamic_start=20, hypotheses=["H3", "cal"],
+                               desc="calibration turn, then hold (0,0,2)", cal_turn=True)
+MISSIONS["box_ct"] = Mission("box_ct", 60, _box, dynamic_start=24, hypotheses=["H3", "cal"],
+                             desc="calibration turn, then the box", cal_turn=True)
+
 # the aggressive-limit overrides these missions need (run_sim MAX_VEL_XY / MAX_TILT_DEG)
 AGGRESSIVE_LIMITS = {"MAX_VEL_XY": "3.5", "MAX_TILT_DEG": "25"}
 
 
-def get(name, gains=None):
+def get(name, gains=None, cal_turn=None):
     m = MISSIONS[name]
+    if cal_turn is not None:
+        m.cal_turn = m.cal_turn or cal_turn
     if gains is not None:
         m.kp_pos = gains["pos_xy"]["kp"]
         m.lead_accel = (1 + gains["vel_xy"]["kd"]) / gains["vel_xy"]["kp"]

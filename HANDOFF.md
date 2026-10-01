@@ -1,5 +1,15 @@
 # Handoff: PID cascade tuning against Gazebo/x500
 
+## 2026-10-01: in-flight calibration (fixes the suite's #1 finding)
+
+Dwell calibration rewritten (`calibration.calibrate_dwell`: average + two-vector attitude +
+honest correlated P), mag bias unpinned and learned during a 360deg calibration turn after
+takeoff (`hover_ct`/`box_ct`, or `CAL_TURN=1`), accel bias still pinned, `gz_bridge.py` mag
+scaled not normalized. Suite: median tilt/heading error 0.72/2.33 -> 0.05/0.12 deg; live hover
+position error 0.25 -> 0.01 m. Details + remaining issues: EKF_TEST_REPORT.md ("In-flight
+calibration - IMPLEMENTED"). Compare new filter changes against
+`testing/results/candidate_calturn/results.json` (suite v2).
+
 ## 2026-09-30 evening: EKF stress-test suite built, baseline recorded (EKF_TEST_PLAN.md)
 
 **Read `EKF_TEST_REPORT.md` (repo root) first** - hypotheses H1-H6 answered with numbers,
