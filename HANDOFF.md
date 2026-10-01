@@ -28,6 +28,11 @@ Headline findings:
 4. `MAX_DT` clamp silently drops rotation during loop stalls (1 s stalls in the patrol
    recording -> 4-5 deg error -> mag gate locked until a GPS reset).
 5. Tier B: 12/12 live trials survived (hover/box/circle_slow/takeoff_land x3).
+6. Later same evening (owner's go-ahead): stall handling implemented in FINAL_gps.py (coast
+   on held gyro/accel through a stall + inflate P) - suite: no graded regressions, big wins
+   on imu_gap/patrol. Mag lockout reset implemented but disabled (MAG_LOCKOUT_STEPS=0) -
+   it let interference through and worsened calibration-caused lockouts. Compare future
+   changes against `testing/results/baseline_86193e6_yawfix` (or candidate_stall_fix).
 
 Controller and filter math untouched. Pre-approved `FINAL_gps.py` changes only: `self.stats`
 counters/`self.last_d2`, and `get_gps() -> None` = skip the update (bit-identical trace

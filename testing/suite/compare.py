@@ -19,7 +19,7 @@ REL = 0.20
 # metric -> absolute floor a change must exceed (in the metric's own units) to count
 FLOOR = {"tilt_rms_deg": 0.05, "tilt_max_deg": 0.2, "yaw_rms_deg": 0.1, "pos_h_rms_m": 0.05,
          "vel_h_rms_ms": 0.02, "nees_att": 0.1, "nees_vel": 0.1, "nees_pos": 0.1,
-         "tilt_drift_deg_s": 0.05, "recovery_s": 0.5, "gps_resets": 0.5, "gps_rejected": 2.5}
+         "tilt_drift_deg_s": 0.05, "recovery_s": 0.5, "gps_resets": 0.5, "gps_rejected": 2.5, "mag_rejected": 50}
 KEYS = list(FLOOR)
 RANK = {"PASS": 0, "WARN": 1, "FAIL": 2}
 

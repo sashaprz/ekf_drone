@@ -318,6 +318,19 @@ reserves controller changes for the owner. After fixing, re-record yaw_steps/yaw
 NEES pos/vel ≈ 1e-3 on clean-GPS runs. Not a filter defect. Keep R_gps for hardware, and
 judge pos/vel consistency on `gpsN`/`REAL` rows only (they read 0.7–2.2).
 
+> **Follow-up 2026-09-30 (owner asked for these):**
+> - **F5 stall handling — IMPLEMENTED** in `FINAL_gps.py` (`missed = dt_raw - dt`): coast
+>   attitude on the held gyro rate (exact rotation), velocity/position on the held accel,
+>   and add the skipped steps' Q plus `STALL_RATE_STD`/`STALL_ACCEL_STD` uncertainty to P.
+>   Full suite vs `baseline_86193e6_yawfix` (`testing/results/candidate_stall_fix/COMPARE.md`):
+>   77 improved, 2 grade changes (both up), no graded regressions; every run without a stall
+>   is bit-identical. circle_fast 1 s gap 15.6 -> 2.1 deg tilt max, mag rejections 656 -> 0;
+>   patrol_long `none` 6.3 -> 0.43 deg, 430 -> 0 rejections. The 57 flagged "regressions" are
+>   ungraded clean-GPS pos/vel NEES (F9) and patrol `cal_ideal` NEES_att getting smaller.
+> - **F2 mag lockout reset — implemented but DISABLED** (`MAG_LOCKOUT_STEPS = 0`): with it on,
+>   0.3-amplitude interference got through the dip-angle guard (tilt 0.7 -> 10-14 deg) and
+>   calibration-caused lockouts got worse (circle_fast imu_noise 9 -> 26 deg). Revisit after F1.
+
 ## 5. Symptom → cause lookup (extended)
 
 | Symptom | Likely cause | Knob / change to consider |

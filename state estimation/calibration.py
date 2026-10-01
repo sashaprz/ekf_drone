@@ -85,6 +85,88 @@ def update_H_mag(predicted_mag, H):
                                #from heading error only because the wiggle varies yaw too
     return H
 
+def R_to_quat(R):
+    # rotation matrix (body->world, same as FINAL_gps.quat_to_R) -> [w, x, y, z]
+    tr = np.trace(R)
+    if tr > 0:
+        s = 2.0 * math.sqrt(tr + 1.0)
+        q = [0.25 * s, (R[2, 1] - R[1, 2]) / s, (R[0, 2] - R[2, 0]) / s, (R[1, 0] - R[0, 1]) / s]
+    else:
+        i = int(np.argmax(np.diag(R)))
+        j, k = (i + 1) % 3, (i + 2) % 3
+        s = 2.0 * math.sqrt(1.0 + R[i, i] - R[j, j] - R[k, k])
+        q = [0.0, 0.0, 0.0, 0.0]
+        q[0] = (R[k, j] - R[j, k]) / s
+        q[1 + i] = 0.25 * s
+        q[1 + j] = (R[j, i] + R[i, j]) / s
+        q[1 + k] = (R[k, i] + R[i, k]) / s
+    q = np.array(q)
+    return q / np.linalg.norm(q)
+
+
+def triad(up_body, mag_body, up_world, mag_world):
+    # attitude from two vector observations: gravity ("up") exactly, the mag field only
+    # for heading (its component perpendicular to up) - so a mag error can't tilt it
+    def frame(a, b):
+        t1 = a / np.linalg.norm(a)
+        t2 = np.cross(t1, b)
+        t2 = t2 / np.linalg.norm(t2)
+        return np.column_stack([t1, t2, np.cross(t1, t2)])
+    return R_to_quat(frame(up_world, mag_world) @ frame(up_body, mag_body).T)
+
+
+def calibrate_dwell(get_gyro, get_accel, get_mag, dwell_steps=200, gravity=9.80665,
+                    mag_ref=(1.0, 0.0, 0.0), accel_bias_std=0.05, mag_bias_std=0.05):
+    """Dwell-only (vehicle at rest) calibration, 2026-09-30 - replaces calibrate(...,
+    wiggle_steps=0) for the live sensors (EKF_TEST_REPORT.md F1). Same return shape as
+    calibrate(): (q, gyro_bias, accel_bias, mag_bias, P 12x12).
+
+    Why not calibrate(): its EKF has attitude Q 0.01 rad^2/step and P0 = I, so it can't
+    average - the last few samples dominate, and sensor noise random-walks the estimate
+    along the directions a dwell can't see (tilt vs accel bias, heading vs mag bias). In
+    Gazebo that left 0.5-1.4deg tilt / 1-7deg heading error from 0.006 m/s^2 of noise, then
+    frozen by the main filter's pinned biases.
+
+    Here: average every sample, attitude from the two mean vectors (triad), gyro bias = mean
+    gyro, accel/mag bias = 0 (their prior - a dwell can't tell them from tilt/heading). The
+    covariance is one Kalman update of a prior (attitude unknown, biases ~ N(0, std^2)) with
+    the averaged accel+mag measurement: it comes out small along what the dwell DID observe
+    and ~ (bias std / field) along tilt<->accel_bias and heading<->mag_bias, WITH the
+    correlation between them - so when the vehicle later rotates and those become
+    observable, the main filter corrects attitude and bias together.
+
+    accel_bias_std / mag_bias_std: prior on the sensor biases (m/s^2, fraction of the unit
+    field) - what a cheap IMU/compass has left after factory calibration."""
+    g, a, m = [], [], []
+    for _ in range(dwell_steps):          # same read order as calibrate() (replay relies on it)
+        g.append(get_gyro())
+        m.append(get_mag())
+        a.append(get_accel())
+    g, a, m = np.array(g, float), np.array(a, float), np.array(m, float)
+    n = len(g)
+    gyro_bias = g.mean(0)
+    a_mean, m_mean = a.mean(0), m.mean(0)
+    mag_ref = np.asarray(mag_ref, float) / np.linalg.norm(mag_ref)
+    q = triad(a_mean, m_mean, np.array([0.0, 0.0, 1.0]), mag_ref)
+
+    # covariance: prior -> one update with the averaged measurement (residual is ~0 by
+    # construction, so only P changes)
+    P = np.zeros((12, 12))
+    P[0:3, 0:3] = np.eye(3) * 1.0                                   # attitude: unknown a priori
+    P[3:6, 3:6] = np.diag(np.maximum(g.var(0), 1e-12) / n)          # gyro bias: averaging
+    P[6:9, 6:9] = np.eye(3) * accel_bias_std ** 2
+    P[9:12, 9:12] = np.eye(3) * mag_bias_std ** 2
+    H = np.zeros((6, 12))
+    H_a, H_m = np.zeros((3, 12)), np.zeros((3, 12))
+    H[0:3] = update_H_accel(rotate_by_quat(quat_conjugate(q), np.array([0.0, 0.0, gravity])), H_a)
+    H[3:6] = update_H_mag(rotate_by_quat(quat_conjugate(q), mag_ref), H_m)
+    R = np.diag(np.r_[np.maximum(a.var(0), 1e-8) / n, np.maximum(m.var(0), 1e-10) / n])
+    K = P @ H.T @ np.linalg.inv(H @ P @ H.T + R)
+    IKH = np.eye(12) - K @ H
+    P = IKH @ P @ IKH.T + K @ R @ K.T
+    return q, gyro_bias, np.zeros(3), np.zeros(3), 0.5 * (P + P.T)
+
+
 def calibrate(get_gyro, get_accel, get_mag, dwell_steps=200, wiggle_steps=400, dt=0.01,
               gravity=1.0, accel_noise_var=0.1, mag_noise_var=0.1, mag_ref=(1.0, 0.0, 0.0)):
     """
