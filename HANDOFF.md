@@ -1,5 +1,14 @@
 # Handoff: PID cascade tuning against Gazebo/x500
 
+## 2026-10-02: harder scenarios - GPS latency + live realistic sensors
+
+`gps_latency` suite fault + `PID/sim_degrade.py` (SIM_REALISTIC=1, SIM_GPS_LATENCY_MS=N; off by default).
+30 live trials: clean 9/9; realistic sensors fine on gentle missions (pos ~0.9 m = GPS noise);
+**circle_fast with 150 ms GPS latency 0/3** (latency is the trigger - 3/3 without it); stops realistic
+2/3 (loop stalls + mag lockout + GPS reset chain). Crash logs replay exactly -> added as suite
+regression recordings (`run_suite.py --extra`). Top fix before hardware: delayed GPS fusion.
+Details: EKF_TEST_REPORT.md "Harder scenarios".
+
 ## 2026-10-01: in-flight calibration (fixes the suite's #1 finding)
 
 Dwell calibration rewritten (`calibration.calibrate_dwell`: average + two-vector attitude +

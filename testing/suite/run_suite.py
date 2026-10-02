@@ -50,7 +50,7 @@ KEY_METRICS = ["tilt_rms_deg", "tilt_max_deg", "yaw_rms_deg", "pos_h_rms_m", "ne
 TRUNCATE = {}
 
 
-def recording_list(names=None):
+def recording_list(names=None, extra=()):
     recs = []
     for name, m in MS.MISSIONS.items():
         path = os.path.join(DATA, f"flight_{name}.csv")
@@ -59,6 +59,11 @@ def recording_list(names=None):
     ref = os.path.join(DATA, REF["file"])
     if os.path.exists(ref) and (not names or REF["name"] in names):
         recs.append({"name": REF["name"], "path": ref, "remapped": True, "t_end": REF["t_end"]})
+    # extra recordings (e.g. live trials that crashed - replay reproduces them): scored on
+    # fault "none" only, named after the file
+    for path in extra:
+        recs.append({"name": os.path.splitext(os.path.basename(path))[0], "path": os.path.abspath(path),
+                     "remapped": False, "t_end": None})
     return recs
 
 
@@ -237,7 +242,7 @@ def git_meta():
 SHORT = {"none": "none", "gps_dropout": "drop", "gps_stale": "stale", "gps_noise": "gpsN", "gps_outliers": "outl",
          "gps_rate": "1Hz", "gyro_bias": "gb", "gyro_drift": "gdrift", "accel_bias": "ab", "mag_bias": "mb",
          "mag_interference": "mint", "imu_noise": "imuN", "imu_spikes": "spike", "imu_dropouts": "idrop",
-         "combined_realistic": "REAL", "cal_ideal": "calIdeal", "imu_gap": "gap"}
+         "combined_realistic": "REAL", "cal_ideal": "calIdeal", "imu_gap": "gap", "gps_latency": "lat"}
 
 
 def short_label(f):
@@ -253,6 +258,8 @@ def short_label(f):
         s += f"{p['frac']:g}"
     elif f.name == "mag_interference":
         s += f"{p['amp']:g}"
+    elif f.name == "gps_latency":
+        s += str(p["latency_ms"])
     elif f.name == "imu_gap":
         s += f"{p['gap_s']:g}"
     return s
@@ -327,6 +334,7 @@ def main():
     ap.add_argument("--out")
     ap.add_argument("--jobs", type=int, default=max(1, (os.cpu_count() or 2) - 2))
     ap.add_argument("--full-patrol", action="store_true", help="run every fault on patrol_long, not PATROL_FAULTS")
+    ap.add_argument("--extra", nargs="*", default=[], help="extra recordings (csv + .cal.csv), fault 'none' only")
     ap.add_argument("--no-plots", action="store_true")
     a = ap.parse_args()
 
@@ -337,7 +345,7 @@ def main():
     plot_dir = None if a.no_plots else os.path.join(out, "plots")
     os.makedirs(plot_dir or out, exist_ok=True)
 
-    recs = recording_list(a.missions)
+    recs = recording_list(a.missions, a.extra)
     if not recs:
         sys.exit(f"no recordings found in {DATA}")
     meta["recordings"] = {r["name"]: sha1(r["path"]) for r in recs}
@@ -349,7 +357,7 @@ def main():
     with Pool(a.jobs) as pool:
         base = pool.map(run_task, [(r, "none", None, plot_dir) for r in recs])
         p95 = {r["mission"]: r.pop("_p95") for r in base}
-        tasks = [(r, f.key, p95[r["name"]], plot_dir) for r in recs if r["name"] != REF["name"]
+        tasks = [(r, f.key, p95[r["name"]], plot_dir) for r in recs if r["name"] in MS.MISSIONS
                  for f in fl if f.key != "none"
                  and (r["name"] != "patrol_long" or a.full_patrol or f.key in PATROL_FAULTS)]
         tasks.sort(key=lambda tk: tk[0]["name"] != "patrol_long")  # longest first

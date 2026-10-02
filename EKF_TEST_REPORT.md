@@ -358,6 +358,41 @@ judge pos/vel consistency on `gpsN`/`REAL` rows only (they read 0.7–2.2).
 >   filter is *under*confident now that errors are ~0.02°, so the live attitude Q (1e-7) is
 >   the next thing to look at.
 
+> **Harder scenarios, 2026-10-02** (GPS latency offline + live realistic sensors; filter = in-flight calibration version).
+> - **New fault `gps_latency` (100/200 ms)**, `testing/results/gps_latency/`: harmless at hover and in gentle flight,
+>   but circle_fast goes 0.15° → 1.3° / 2.8° tilt RMS (5.3° max, 9 GPS resets at 200 ms). The EKF compares a
+>   150–200 ms-old GPS velocity with *now*, and under sustained acceleration the difference (a × latency ≈
+>   0.35–0.5 m/s) reads as attitude error.
+> - **Live sensor degradation** (`PID/sim_degrade.py`, off by default): `SIM_REALISTIC=1` applies the
+>   `combined_realistic` set in the bridge (controller flies on it too), `SIM_GPS_LATENCY_MS=N` delays fixes.
+>   `run_live.py` gained `--tag/--env/--cal-turn`. 30 live trials, all with the calibration turn:
+>
+>   | condition | hover | box | yaw_steps | stops | circle_fast |
+>   |---|---|---|---|---|---|
+>   | clean (`live_clean_ct`) | – | – | 3/3 | 3/3 | 3/3 |
+>   | realistic + 150 ms latency (`live_real_lat_ct`) | 3/3 | 3/3 | 3/3 | 3/3 | **0/3** |
+>   | realistic, no latency (`live_real_ct`) | – | – | – | **2/3** | 3/3 |
+>
+>   Clean: tilt error 0.05–0.15°. Realistic, gentle missions: est position ~0.9 m RMS (= GPS noise), constant
+>   −0.2° pitch (pinned 0.05 m/s² accel bias / g, as predicted).
+> - **Failures, diagnosed from the logs** (replay reproduces stops t3 and circle_fast t1 exactly, so they are pure
+>   estimator failures; all four are in the suite as regression recordings, `testing/results/live_crash_regressions/`,
+>   via `run_suite.py --extra <csv>`):
+>   1. circle_fast + latency (t2, t3): heading error builds to −4…+8° as speed reaches 3 m/s, then GPS
+>      rejections → lockout reset → divergence. The latency mechanism above, now closed-loop with noise.
+>   2. circle_fast + latency (t1): host loop stalls up to **2.1 s** (36 > 50 ms) during the calibration turn; the
+>      stall inflation opens P_att to ~10°, and the next *delayed, noisy* GPS velocity is mapped into tilt
+>      through the cross-covariance (3° → 40° in 3 s). Stall handling + latency interact badly.
+>   3. stops, realistic, no latency (t3): 84 loop stalls (max 0.35 s) plus a mag lockout (437 rejections) during
+>      3 m/s reversals, then GPS rejections and two lockout resets at t=55–56 s. Tilt error goes 2° → 24° in
+>      1 s. The GPS reset repairs position/velocity, not the attitude damage, so the controller flies on it.
+> - **Next filter work, in priority order**: (a) **latency compensation**: fuse each GPS fix against the state
+>   at the time it was measured (keep a ~0.5 s ring buffer of predicted pos/vel; residual = fix − buffered
+>   state, correction applied now). This is the standard "delayed fusion" PX4's EKF2 uses. (b) After a stall,
+>   don't let GPS-velocity residuals rotate attitude more than the coasted rotation could have
+>   (e.g. cap the P_att inflation or skip GPS attitude coupling for ~0.5 s). (c) GPS-reset hygiene: after a
+>   lockout reset, check attitude consistency rather than trusting it.
+
 ## 5. Symptom → cause lookup (extended)
 
 | Symptom | Likely cause | Knob / change to consider |

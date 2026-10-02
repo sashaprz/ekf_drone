@@ -143,6 +143,16 @@ class Fault:
         c["gps_ok"] = np.r_[1.0, (np.diff(epoch) > 0).astype(float)]
         return c, info
 
+    def _gps_latency(self, c, ctx, info):
+        # every fix arrives latency_ms late: the row at time t carries the GPS values the
+        # recording had at t - latency (real receivers: ~100-200 ms; Gazebo's: ~0). The EKF
+        # fuses each fix as if it described "now" - this measures what that costs.
+        t = c["t"]
+        idx = np.clip(np.searchsorted(t, t - self.params["latency_ms"] / 1000.0, side="right") - 1, 0, len(t) - 1)
+        for k in GPS_POS + GPS_VEL:
+            c[k] = c[k][idx]
+        return c, info
+
     # ---- IMU / mag -------------------------------------------------------------
     def _gyro_bias(self, c, ctx, info):
         rng = _rng(self.name, self.seed)
@@ -277,6 +287,7 @@ ALL_FAULTS = (
     + [_mk("gps_dropout", ["H1"], duration_s=d) for d in (5, 15, 30)]
     + [_mk("gps_stale", ["H1"], duration_s=d) for d in (5, 15, 30)]
     + [_mk("gps_noise", ["H6"]), _mk("gps_outliers", ["H6"], frac=0.01), _mk("gps_rate", ["H1", "H6"], hz=1.0)]
+    + [_mk("gps_latency", ["H6", "latency"], latency_ms=ms) for ms in (100, 200)]
     + [_mk("gyro_bias", ["gyro_bias"], dps=d) for d in (0.2, 1.0)]
     + [_mk("gyro_bias", ["gyro_bias"], dps=1.0, from_cal=False), _mk("gyro_drift", ["gyro_bias"], dps=0.5, over_s=60)]
     + [_mk("accel_bias", ["H2"], axis=a, ms2=m) for a in ("x", "z") for m in (0.05, 0.2, 0.5)]
@@ -291,7 +302,7 @@ ALL_FAULTS = (
 
 GPS_OUTAGE = {"gps_dropout", "gps_stale"}
 GPS_NOISY = {"gps_noise", "combined_realistic"}
-GPS_FAULTS = GPS_OUTAGE | GPS_NOISY | {"gps_outliers", "gps_rate"}
+GPS_FAULTS = GPS_OUTAGE | GPS_NOISY | {"gps_outliers", "gps_rate", "gps_latency"}
 WINDOWED = {"gps_dropout", "gps_stale", "mag_interference", "imu_gap"}
 
 

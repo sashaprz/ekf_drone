@@ -32,10 +32,16 @@ FLY = "/mnt/c/Users/Sasha/repos/python_drone/testing/suite/fly.sh"
 GROUND_OK = {"takeoff_land": (MS.SETTLE_S + 8, MS.SETTLE_S + 26)}
 
 
-def fly(mission, k):
-    csv = f"testing/data/live/{mission}_t{k}.csv"
-    log = f"testing/data/logs/live_{mission}_t{k}.log"
+def trial_name(mission, k, tag):
+    return f"{mission}{'_' + tag if tag else ''}_t{k}"
+
+
+def fly(mission, k, tag="", extra_env=()):
+    name = trial_name(mission, k, tag)
+    csv = f"testing/data/live/{name}.csv"
+    log = f"testing/data/logs/live_{name}.log"
     envs = [f"{k_}={v}" for k_, v in MS.AGGRESSIVE_LIMITS.items()] if MS.MISSIONS[mission].aggressive else []
+    envs += list(extra_env)
     t0 = time.time()
     p = subprocess.run(["wsl", "-d", "Ubuntu-24.04", "--", "bash", FLY, mission, csv, log, *envs],
                        capture_output=True, text=True)
@@ -82,6 +88,8 @@ def score(path, mi):
               "est_vel_h_rms_ms": float(np.sqrt(np.mean(np.hypot(ev[air, 0], ev[air, 1]) ** 2)))})
     log = os.path.join(RS.DATA, "logs", "live_" + os.path.basename(path)[:-4] + ".log")
     r["gps_resets_printed"] = open(log).read().count("EKF_GPS_RESET") if os.path.exists(log) else None
+    # real vehicle state vs the mission (EKF-independent): worst true tilt while flying
+    r["true_tilt_max_profile_deg"] = float(tilt_true[(cols["mt"] >= mi.profile_start) & air].max()) if air.any() else None
     return r
 
 
@@ -101,17 +109,22 @@ def main():
     ap.add_argument("--trials", type=int, default=3)
     ap.add_argument("--out", required=True)
     ap.add_argument("--score-only", action="store_true")
+    ap.add_argument("--tag", default="", help="suffix for trial files, e.g. realistic")
+    ap.add_argument("--env", nargs="*", default=[], help="extra ENV=VAL for run_sim, e.g. SIM_REALISTIC=1")
+    ap.add_argument("--cal-turn", action="store_true", help="fly the in-flight calibration turn first (CAL_TURN=1)")
     a = ap.parse_args()
+    if a.cal_turn:
+        a.env.append("CAL_TURN=1")
     os.makedirs(LIVE, exist_ok=True)
     os.makedirs(a.out, exist_ok=True)
-    res = {"meta": RS.git_meta(), "missions": {}}
+    res = {"meta": {**RS.git_meta(), "tag": a.tag, "env": a.env}, "missions": {}}
     for m in a.missions:
-        mi = MS.get(m)
+        mi = MS.get(m, cal_turn=a.cal_turn)
         trials = []
         for k in range(1, a.trials + 1):
-            path = os.path.join(LIVE, f"{m}_t{k}.csv")
+            path = os.path.join(LIVE, trial_name(m, k, a.tag) + ".csv")
             if not a.score_only:
-                path = fly(m, k)
+                path = fly(m, k, a.tag, a.env)
             if not os.path.exists(path):
                 trials.append({"survived": False, "completed": False, "error": "no csv"})
                 continue
@@ -126,7 +139,8 @@ def main():
         print(f"{m}: survived {res['missions'][m]['summary']['survived']}/{len(trials)}", flush=True)
     with open(os.path.join(a.out, "tierB.json"), "w") as f:
         json.dump(res, f, indent=1, sort_keys=True)
-    L = ["# Tier B - closed loop on the EKF", "", f"code `{res['meta']['git']}`{' (dirty)' if res['meta']['dirty'] else ''}", "",
+    L = ["# Tier B - closed loop on the EKF", "", f"code `{res['meta']['git']}`{' (dirty)' if res['meta']['dirty'] else ''}"
+         f" - tag `{a.tag or '-'}`, env `{' '.join(a.env) or '-'}`", "",
          "| mission | survived | track_h rms (EKF) | track_h rms (ORACLE) | track_h max (EKF) | est tilt rms | est tilt max | "
          "est yaw rms | est yaw mean | est roll/pitch mean | est pos_h rms |", "|---|" + "---|" * 10]
 

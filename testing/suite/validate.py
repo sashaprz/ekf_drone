@@ -61,7 +61,7 @@ def check_faults(rec, lines, png):
                "mag_interference": expected["mag"], "imu_noise": expected["gyro"] | expected["accel"],
                "imu_spikes": expected["gyro"] | expected["accel"], "imu_dropouts": set(),
                "combined_realistic": expected["gps"] | expected["gyro"] | expected["accel"] | expected["mag"],
-               "cal_ideal": set(), "imu_gap": set()}
+               "cal_ideal": set(), "imu_gap": set(), "gps_latency": expected["gps"]}
     examples = {}
     for f in F.ALL_FAULTS:
         fc, info = f.apply(ref, ctx)

@@ -327,6 +327,7 @@ def main():
                   "mt,spx,spy,spz,spyaw,eqw,eqx,eqy,eqz,epx,epy,epz,evx,evy,evz\n")
     if ORACLE:
         print("ORACLE MODE - controller is flying on Gazebo ground truth, not the EKF", flush=True)
+    print(bridge.degrade.describe(), flush=True)
 
     last_t = time.time()
     start_t = last_t

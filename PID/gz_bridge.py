@@ -9,6 +9,8 @@ from gz.msgs10.navsat_pb2 import NavSat
 from gz.msgs10.actuators_pb2 import Actuators
 from gz.msgs10.pose_v_pb2 import Pose_V
 
+from sim_degrade import SensorDegrader
+
 # topic/model names match the x500 SITL default world - see `gz topic -l` while
 # `make px4_sitl gz_x500` is running
 IMU_TOPIC = "/world/default/model/x500_0/link/base_link/sensor/imu_sensor/imu"
@@ -49,11 +51,17 @@ class GazeboBridge:
 
         self._gyro = (0.0, 0.0, 0.0)
         self._accel = (0.0, 0.0, 0.0)
+        self._gyro_clean = (0.0, 0.0, 0.0)
+        self._accel_clean = (0.0, 0.0, 0.0)
         self._mag = (1.0, 0.0, 0.0)
         self._mag_scale = None  # field strength of the first reading - see _on_mag
         # world-frame field direction for FINAL_gps.py's mag model - see MAG_REFERENCE_ENU
         self.mag_reference = MAG_REFERENCE_ENU
         self._gps = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        # optional live sensor degradation (SIM_REALISTIC / SIM_GPS_LATENCY_MS env vars) -
+        # a no-op by default, see sim_degrade.py
+        self.degrade = SensorDegrader()
+        self._gps_seen = False
 
         # local-frame origin, set from the first GPS fix received (matches
         # FINAL_gps.py's assumption that position/velocity start at zero)
@@ -87,7 +95,7 @@ class GazeboBridge:
         # any real (if fast) rotation.
         gyro = (msg.angular_velocity.x, msg.angular_velocity.y, msg.angular_velocity.z)
         if math.sqrt(gyro[0]**2 + gyro[1]**2 + gyro[2]**2) <= 50.0:
-            self._gyro = gyro
+            self._gyro_clean = gyro
 
         # sanity bound, 2026-09-26: gz-transport occasionally delivers a genuinely
         # corrupted IMU message with an accel magnitude in the hundreds of m/s^2 (40+g,
@@ -103,7 +111,10 @@ class GazeboBridge:
         # than feed this to the EKF at all.
         accel = (msg.linear_acceleration.x, msg.linear_acceleration.y, msg.linear_acceleration.z)
         if math.sqrt(accel[0]**2 + accel[1]**2 + accel[2]**2) <= 6 * 9.80665:
-            self._accel = accel
+            self._accel_clean = accel
+        # degrade from the clean held values, so a guard-rejected sample can't get its
+        # bias applied twice
+        self._gyro, self._accel = self.degrade.imu(self._gyro_clean, self._accel_clean)
 
         self._imu_event.set()
 
@@ -129,7 +140,7 @@ class GazeboBridge:
             self._mag_scale = norm
         if self._mag_scale:
             v = v / self._mag_scale
-        self._mag = tuple(v)
+        self._mag = self.degrade.mag(tuple(v))
 
     def _on_gps(self, msg):
         if self._home_lat is None:
@@ -148,6 +159,9 @@ class GazeboBridge:
         # velocity feedback through it is negative along one diagonal but POSITIVE
         # along the other - a good fit for "any nonzero pos_xy gain tumbles it".
         self._gps = (east, north, up, msg.velocity_east, msg.velocity_north, msg.velocity_up)
+        self._gps_seen = True
+        if self.degrade.active:
+            self.degrade.gps_in(self._gps)
 
     def _on_pose(self, msg):
         for p in msg.pose:
@@ -192,6 +206,8 @@ class GazeboBridge:
         return self._mag
 
     def get_gps(self):
+        if self.degrade.active and self._gps_seen:
+            return self.degrade.gps_out((0.0, 0.0, 0.0, 0.0, 0.0, 0.0))
         return self._gps
 
     def publish_motors(self, m1, m2, m3, m4):
