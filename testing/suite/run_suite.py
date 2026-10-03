@@ -150,7 +150,7 @@ def fault_context(rec, cols):
 
 
 # ---- one replay ----------------------------------------------------------------------
-def replay(cols, remapped, cal):
+def replay(cols, remapped, cal, gps_latency=0.0):
     n = len(cols["t"])
     out = {"t": cols["t"], "q": np.zeros((n, 4)), "pos": np.zeros((n, 3)), "vel": np.zeros((n, 3)),
            "P_att": np.zeros((n, 3, 3)), "P_vel": np.zeros((n, 3, 3)), "P_pos": np.zeros((n, 3, 3)),
@@ -172,6 +172,7 @@ def replay(cols, remapped, cal):
             last["n"], last["rej"] = nn, s["gps_rejected"]
 
     src = replay_ekf.ArrayReplay({k: v.tolist() for k, v in cols.items()}, remapped=remapped, cal=cal)
+    src.gps_latency = gps_latency
     ekf = None
     with np.errstate(all="ignore"):
         try:
@@ -196,7 +197,8 @@ def run_task(task):
     if "keep" in info:
         truth = {k: (v[info["keep"]] if isinstance(v, np.ndarray) and len(v) == len(info["keep"]) else v)
                  for k, v in truth.items()}
-    run = replay(fcols, rec["remapped"], cal_f)
+    lat = info.get("gps_latency_s", replay_ekf.load_meta(rec["path"]).get("gps_latency_s", 0.0))
+    run = replay(fcols, rec["remapped"], cal_f, lat)
     m = M.compute(run, truth, info, fault, p95)
     grades, overall = M.grade(m, fault)
     res = {"mission": rec["name"], "fault": fault.name, "fault_key": fault.key, "params": fault.params,
@@ -259,7 +261,7 @@ def short_label(f):
     elif f.name == "mag_interference":
         s += f"{p['amp']:g}"
     elif f.name == "gps_latency":
-        s += str(p["latency_ms"])
+        s += str(p["latency_ms"]) + ("nc" if p.get("ekf_latency_ms") == 0 else "")
     elif f.name == "imu_gap":
         s += f"{p['gap_s']:g}"
     return s

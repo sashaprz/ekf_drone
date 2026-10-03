@@ -22,6 +22,7 @@ the hypothesized orietnation you're comparing accel/mag against is the gyro's me
 
 import time
 import math
+import collections
 import numpy as np
 import calibration
 
@@ -126,6 +127,16 @@ MAG_DIP_TOL = math.radians(10)
 NOMINAL_DT = 0.004
 STALL_RATE_STD = 0.1    # rad/s
 STALL_ACCEL_STD = 1.0   # m/s^2
+# for this long after a stall, GPS corrects only position/velocity, not attitude/biases,
+# 2026-10-02. Right after a stall P_att is inflated, so a noisy (or late) GPS velocity
+# residual gets mapped into attitude through the cross-covariance - in a live flight a 2 s
+# stall followed by 150 ms-late noisy GPS took tilt error 3 -> 40deg in 3 s.
+STALL_GPS_ATT_HOLD_S = 1.0
+# how long the held gyro rate / accel are trusted through a stall (decaying coast)
+STALL_COAST_TAU = 0.25  # s
+# delayed GPS fusion, 2026-10-02: history of predicted pos/vel kept this long, so a fix can
+# be compared with the state at the time it was MEASURED (now - gps_latency)
+GPS_HISTORY_S = 1.5
 
 #math helpers
 def rotate_by_quat(q, v):
@@ -323,6 +334,19 @@ class DroneEKF:
         # Sensors can supply their own via a `mag_reference` attribute.
         _mag_ref = np.asarray(getattr(sensors, "mag_reference", (1.0, 0.0, 0.0)), dtype=float)
         self._mag_ref = _mag_ref / np.linalg.norm(_mag_ref)
+        # GPS latency (s), 2026-10-02: a fix describes the vehicle gps_latency seconds ago.
+        # Real receivers ~0.1-0.2 s (PX4's EKF2_GPS_DELAY defaults to 110 ms); sensors can
+        # supply it via a `gps_latency` attribute, default 0 (= the old behaviour, exactly).
+        self.gps_latency = float(getattr(sensors, "gps_latency", 0.0))
+        # clock, 2026-10-03: the IMU sample's own timestamp when the sensor provides one
+        # (gz_bridge: Gazebo sim time) - dt is then the true sample spacing, not whenever the
+        # sample happened to be processed. Otherwise wall time (and replay's patched clock).
+        if sensors is not None and getattr(sensors, "use_timestamps", False) and hasattr(sensors, "get_imu_time"):
+            self._clock = lambda: (sensors.get_imu_time() if sensors.get_imu_time() is not None else time.time())
+        else:
+            self._clock = lambda: time.time()
+        self._history = collections.deque()   # (t, position, velocity) after each predict
+        self._gps_att_hold_until = -math.inf  # see STALL_GPS_ATT_HOLD_S
         # live-bridge attitude process noise, 2026-09-30. Module-level Q's attitude block
         # (0.01 rad^2 added EVERY predict step, not dt-scaled) is ~1e9x what Gazebo's
         # gyro actually warrants (x500 IMU: 0.00087 rad/s stddev at 250Hz -> ~1e-11 rad^2
@@ -476,8 +500,8 @@ class DroneEKF:
             self.P[12:15, 12:15] = np.eye(3) * 1e-6
 
         #timing starts here, AFTER calibration - see the comment above where these used to live
-        self.last_time = time.time()
-        self.last_gps_time = time.time()
+        self.last_time = self._clock()
+        self.last_gps_time = self._clock()
         self.gps_rejections = 0
         # read-only instrumentation for testing/suite (EKF_TEST_PLAN.md s1 exception 1):
         # counters + the last gate distances. Nothing in the filter reads these.
@@ -517,6 +541,29 @@ class DroneEKF:
         dq = np.array([1.0, d_theta[0]/2, d_theta[1]/2, d_theta[2]/2])
         self.q = quat_mult(self.q, dq)
         self.q = self.q / np.linalg.norm(self.q)
+
+    def _state_at(self, t):
+        # predicted (position, velocity) at time t from the history, linearly interpolated;
+        # the current state when there's no latency (bit-identical to the old behaviour)
+        if self.gps_latency <= 0 or not self._history:
+            return self.position, self.velocity
+        h = self._history
+        if t <= h[0][0]:
+            return h[0][1], h[0][2]
+        for k in range(len(h) - 1, 0, -1):
+            t0, p0, v0 = h[k - 1]
+            t1, p1, v1 = h[k]
+            if t0 <= t:
+                f = 0.0 if t1 == t0 else min((t - t0) / (t1 - t0), 1.0)
+                return p0 + f * (p1 - p0), v0 + f * (v1 - v0)
+        return h[-1][1], h[-1][2]
+
+    def _shift_history(self, d_pos, d_vel):
+        # a correction applied now also applies to the stored past states, so the next fix
+        # isn't compared against pre-correction history (and corrected twice)
+        for _, p, v in self._history:
+            p += d_pos
+            v += d_vel
 
     def step(self):
         #one iteration of what used to be the module-level main loop: read sensors,
@@ -558,7 +605,7 @@ class DroneEKF:
         corrected_mag_z = mag_z - self.mag_bias_z
 
         #predict: integrate gyro into current angle estimation
-        now = time.time()
+        now = self._clock()
         dt_raw = now - self.last_time #sampling as fast as the hardware can handle
         dt = min(dt_raw, MAX_DT)  # clamp against a stalled tick - see MAX_DT's comment
         missed = dt_raw - dt      # >0 only after a stall - see NOMINAL_DT's comment
@@ -588,25 +635,44 @@ class DroneEKF:
             # UNKNOWN part (rate/accel changing during the gap) to P, so the gates re-open.
             # (First version inflated attitude by |held rate| * gap on all 3 axes - yaw_spin
             # with a 1 s gap got 30deg of fake tilt uncertainty and GPS tilted it 11deg.)
-            ang = np.linalg.norm(w) * missed
+            # 2026-10-02: the held rate/accel are coasted with a decay (time constant
+            # STALL_COAST_TAU), not held for the whole gap: holding a 0.25 rad/s roll rate
+            # through a 1.1 s stall on circle_fast (where roll/pitch rates oscillate at
+            # ~1 rad/s) added 15deg of rotation that never happened and crashed a live
+            # flight. Short gaps are coasted almost fully, long ones only ~ rate * tau.
+            t_coast = STALL_COAST_TAU * (1.0 - math.exp(-missed / STALL_COAST_TAU))
+            # roll/pitch rates decay (tilt is bounded, so they must reverse); the yaw rate is
+            # held for the whole gap (a vehicle can keep yawing - a decayed yaw coast left a
+            # 1 s gap in yaw_spin 22deg short, and the mag fix dragged tilt 5deg with it)
+            rot_vec = np.array([w[0] * t_coast, w[1] * t_coast, w[2] * missed])
+            ang = np.linalg.norm(rot_vec)
             if ang > 0:
-                axis = w / np.linalg.norm(w)
+                axis = rot_vec / ang
                 self.q = quat_mult(self.q, np.array([math.cos(ang / 2), *(axis * math.sin(ang / 2))]))
                 self.q = self.q / np.linalg.norm(self.q)
-            # same for velocity/position: coast on the held acceleration. Without it a 1 s
-            # gap at 2.3 m/s left ~2 m of position error that GPS pulled back only slowly;
-            # velocity-only coasting fixed that but overshot through stops' 3 m/s reversals
-            # (pos 0.12 -> 0.31 m) - holding the accel too gives 0.13 m there, 0.09 m on
-            # circle_fast (EKF suite imu_gap rows).
-            self.position += self.velocity * missed + 0.5 * accel_world * missed ** 2
-            self.velocity += accel_world * missed
+            dv = accel_world * t_coast
+            self.position += (self.velocity + 0.5 * dv) * missed
+            self.velocity += dv
             self.P += self.Q * (missed / NOMINAL_DT)
+            # uncertainty: rate/accel change during the gap (all axes), plus the roll/pitch
+            # rotation we did NOT coast - about that axis only (spinning in yaw mustn't make
+            # tilt uncertain: an isotropic version gave yaw_spin 30deg of fake tilt sigma)
             rot_std = STALL_RATE_STD * missed
             vel_std = STALL_ACCEL_STD * missed
             self.P[0:3, 0:3] += np.eye(3) * rot_std ** 2
-            self.P[6:9, 6:9] += np.eye(3) * vel_std ** 2
+            rate_xy = math.hypot(w[0], w[1])
+            if rate_xy > 0:
+                axis_xy = np.array([w[0], w[1], 0.0]) / rate_xy
+                self.P[0:3, 0:3] += np.outer(axis_xy, axis_xy) * (rate_xy * (missed - t_coast)) ** 2
+            self.P[6:9, 6:9] += np.eye(3) * vel_std ** 2 + np.eye(3) * (np.linalg.norm(accel_world) * (missed - t_coast)) ** 2
             self.P[9:12, 9:12] += np.eye(3) * (vel_std * missed / 2) ** 2
             self.stats["stalls"] += 1
+            self._gps_att_hold_until = now + STALL_GPS_ATT_HOLD_S
+
+        if self.gps_latency > 0:
+            self._history.append((now, self.position.copy(), self.velocity.copy()))
+            while self._history and self._history[0][0] < now - GPS_HISTORY_S:
+                self._history.popleft()
 
         #Each correction below is applied immediately (apply_correction) and re-linearizes
         #the next one against the just-updated q, rather than pooling all three against one
@@ -629,7 +695,12 @@ class DroneEKF:
             self.H_gps = update_H_gps(self.H_gps) #builds measurment jacobian for this update
             S_gps = self.H_gps @ self.P @ self.H_gps.T + R_gps #how much uncertainty you'd expect in residual, combining current uncertainty with sensor noise R_gps
             K_gps = self.P @ self.H_gps.T @ np.linalg.inv(S_gps) #computing kalman fain
-            predicted_gps = np.concatenate([self.position, self.velocity]) #what you expect gps to report
+            # delayed fusion: compare the fix with the state when it was measured, not now
+            # (2026-10-02 - with 150-200 ms latency, a fix compared with "now" under
+            # sustained acceleration read a x latency ~0.4 m/s as attitude error; live
+            # circle_fast with realistic sensors + 150 ms latency crashed 3/3)
+            past_pos, past_vel = self._state_at(now - self.gps_latency)
+            predicted_gps = np.concatenate([past_pos, past_vel]) #what you expect gps to report
             residual_gps = gps_measurement - predicted_gps #what gps reported vs what you expected
             #gate against a bad fix (multipath, momentary bad geometry) - R_gps isn't
             #adaptively inflated like R_accel, so no separate "base" R is needed here
@@ -650,8 +721,11 @@ class DroneEKF:
                     self.stats["gps_resets"] += 1
                     print(f"EKF_GPS_RESET t={now:.3f} after {self.gps_rejections} rejections "
                           f"d2={d_squared_gps:.1f} pos_err={residual_gps[0:3].round(2)}", flush=True)
-                    self.position = gps_measurement[0:3].copy()
-                    self.velocity = gps_measurement[3:6].copy()
+                    # the fix is gps_latency old: carry it forward by how far the state moved since
+                    new_pos = gps_measurement[0:3] + (self.position - past_pos)
+                    new_vel = gps_measurement[3:6] + (self.velocity - past_vel)
+                    self._shift_history(new_pos - self.position, new_vel - self.velocity)
+                    self.position, self.velocity = new_pos, new_vel
                     self.P[6:12, :] = 0.0
                     self.P[:, 6:12] = 0.0
                     self.P[6:12, 6:12] = R_gps[[3, 4, 5, 0, 1, 2]][:, [3, 4, 5, 0, 1, 2]]
@@ -661,7 +735,13 @@ class DroneEKF:
 
             if d_squared_gps <= chi2_threshold_gps:
                 self.stats["gps_updates"] += 1
-                self.apply_correction(K_gps @ residual_gps)
+                if now < self._gps_att_hold_until:
+                    # just after a stall: GPS may fix pos/vel only - see STALL_GPS_ATT_HOLD_S
+                    K_gps[0:6, :] = 0.0
+                    K_gps[12:18, :] = 0.0
+                correction = K_gps @ residual_gps
+                self.apply_correction(correction)
+                self._shift_history(correction[9:12], correction[6:9])
                 #Joseph form - numerically robust to floating-point drift (keeps P symmetric/PSD),
                 #vs the algebraically-equivalent but fragile (I-KH)@P
                 self.P = (I - K_gps @ self.H_gps) @ self.P @ (I - K_gps @ self.H_gps).T + K_gps @ R_gps @ K_gps.T

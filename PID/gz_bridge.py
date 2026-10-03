@@ -1,4 +1,6 @@
+import collections
 import math
+import os
 import threading
 import numpy as np
 
@@ -52,6 +54,18 @@ class GazeboBridge:
         self._gyro = (0.0, 0.0, 0.0)
         self._accel = (0.0, 0.0, 0.0)
         self._gyro_clean = (0.0, 0.0, 0.0)
+        # IMU sample queue + timestamps, 2026-10-03. Every IMU message is kept with Gazebo's
+        # own timestamp (header.stamp, sim time) so a consumer that calls drain_imu() can
+        # step the EKF once per sample with the TRUE sample spacing. Before, only the latest
+        # sample was kept and dt came from arrival time: when gz-transport delivered a burst
+        # after a 100 ms hiccup, ~100 ms of motion was integrated as a few ms (live crash
+        # stops_real_ct_t3). Callers that never drain (test_*_loop.py) see the old
+        # latest-sample behaviour. EKF_IMU_TIMESTAMPS=0 turns the whole thing off (A/B).
+        self.use_timestamps = os.environ.get("EKF_IMU_TIMESTAMPS", "1") == "1"
+        self._imu_queue = collections.deque(maxlen=5000)
+        self._imu_queued = False   # becomes True on the first drain_imu()
+        self._imu_time = None      # timestamp of the sample get_gyro/get_accel serve
+        self._true_stamp = None
         self._accel_clean = (0.0, 0.0, 0.0)
         self._mag = (1.0, 0.0, 0.0)
         self._mag_scale = None  # field strength of the first reading - see _on_mag
@@ -61,6 +75,11 @@ class GazeboBridge:
         # optional live sensor degradation (SIM_REALISTIC / SIM_GPS_LATENCY_MS env vars) -
         # a no-op by default, see sim_degrade.py
         self.degrade = SensorDegrader()
+        # GPS latency the EKF should compensate (s) - read by DroneEKF (delayed fusion).
+        # EKF_GPS_LATENCY_MS overrides (on hardware: the receiver's known latency); in sim it
+        # defaults to the latency sim_degrade injects (0 unless SIM_GPS_LATENCY_MS is set).
+        _lat = os.environ.get("EKF_GPS_LATENCY_MS")
+        self.gps_latency = float(_lat) / 1000.0 if _lat else self.degrade.latency
         self._gps_seen = False
 
         # local-frame origin, set from the first GPS fix received (matches
@@ -114,7 +133,12 @@ class GazeboBridge:
             self._accel_clean = accel
         # degrade from the clean held values, so a guard-rejected sample can't get its
         # bias applied twice
-        self._gyro, self._accel = self.degrade.imu(self._gyro_clean, self._accel_clean)
+        gyro_d, accel_d = self.degrade.imu(self._gyro_clean, self._accel_clean)
+        st = msg.header.stamp
+        sample = (st.sec + st.nsec * 1e-9, gyro_d, accel_d)
+        self._imu_queue.append(sample)
+        if not self._imu_queued:
+            self._imu_time, self._gyro, self._accel = sample
 
         self._imu_event.set()
 
@@ -166,6 +190,8 @@ class GazeboBridge:
     def _on_pose(self, msg):
         for p in msg.pose:
             if p.name == "x500_0":
+                st = msg.header.stamp
+                self._true_stamp = st.sec + st.nsec * 1e-9
                 self._true_quat = (p.orientation.w, p.orientation.x, p.orientation.y, p.orientation.z)
                 self._true_pos = (p.position.x, p.position.y, p.position.z)
                 break
@@ -195,6 +221,29 @@ class GazeboBridge:
         got_new = self._imu_event.wait(timeout)
         self._imu_event.clear()
         return got_new
+
+    def drain_imu(self, timeout=0.1):
+        # every IMU sample received since the last call, oldest first: [(stamp, gyro, accel)].
+        # Waits up to `timeout` for at least one. Call use_imu_sample() on each before
+        # ekf.step(), so get_gyro/get_accel/get_imu_time serve that sample.
+        self._imu_queued = True
+        if not self._imu_queue:
+            self._imu_event.wait(timeout)
+        self._imu_event.clear()
+        out = []
+        while self._imu_queue:
+            out.append(self._imu_queue.popleft())
+        return out
+
+    def use_imu_sample(self, sample):
+        self._imu_time, self._gyro, self._accel = sample
+
+    def get_imu_time(self):
+        # sim-time stamp of the current IMU sample - DroneEKF uses it as its clock
+        return self._imu_time
+
+    def get_true_stamp(self):
+        return self._true_stamp
 
     def get_gyro(self):
         return self._gyro

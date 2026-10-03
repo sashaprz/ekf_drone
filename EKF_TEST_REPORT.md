@@ -393,6 +393,48 @@ judge pos/vel consistency on `gpsN`/`REAL` rows only (they read 0.7–2.2).
 >   (e.g. cap the P_att inflation or skip GPS attitude coupling for ~0.5 s). (c) GPS-reset hygiene: after a
 >   lockout reset, check attitude consistency rather than trusting it.
 
+> **Latency + stall fixes — IMPLEMENTED 2026-10-02** (`FINAL_gps.py`; compare `testing/results/candidate_latency/`):
+> - **Delayed GPS fusion**: a ~1.5 s history of predicted pos/vel; each fix is compared with the state at
+>   `now − gps_latency`, and the correction is applied now and to the history. The lockout reset carries the
+>   fix forward the same way. The latency comes from the sensor object (`gps_latency`: the bridge uses
+>   `EKF_GPS_LATENCY_MS`, else the simulated latency; recordings carry it in `<csv>.meta.json`). With latency 0
+>   it is bit-identical to before. circle_fast with 200 ms latency: 2.82°/5.25° tilt RMS/max and 9 resets →
+>   **0.22°/0.59°, 0 resets** (no-latency level: 0.15°/0.42°). The `gps_latency(ekf_latency_ms=0)` row keeps
+>   the uncompensated case as a reference.
+> - **Stall handling, revised**: roll/pitch rates and the acceleration are coasted with a 0.25 s decay
+>   (`STALL_COAST_TAU`), because tilt is bounded and those rates must reverse. The yaw rate is held for the
+>   whole gap. Holding the full roll rate through a 1.1 s stall had added 15° that never happened (live crash
+>   t1). The uncoasted roll/pitch rotation is added to P about that axis only. For 1 s after a stall
+>   (`STALL_GPS_ATT_HOLD_S`) GPS corrects only pos/vel.
+> - Live re-test: circle_fast realistic + 150 ms latency **3/3** (was 0/3), est tilt 0.6° RMS / 1.8° max;
+>   stops realistic **3/3**. The host had no stalls during these runs; stalls are covered by `imu_gap` and the
+>   crash replays.
+> - Crash replays: circle_fast t2/t3 → WARN. circle_fast t1 holds ~1° through the stall burst where it used to
+>   reach 19–40°; the row still grades F because the recording itself contains the real tumble. **stops t3 is
+>   not fixed**, and it's a different problem: IMU *delivery* stalled (four 101 ms `wait_for_imu` timeouts,
+>   then bursts of queued messages 1–4 ms apart). The EKF integrates by arrival time, so ~100 ms of motion
+>   per burst is lost. Fix: integrate on the IMU message's own timestamp (on hardware, the IMU FIFO
+>   timestamps). Not done yet.
+> - Suite, all 361 runs: excluding NEES 299 PASS / 40 WARN / 22 FAIL; no graded regressions vs the previous
+>   filter.
+
+> **IMU timestamps — IMPLEMENTED 2026-10-03** (fixes the stops_real_ct_t3 failure mode):
+> - `gz_bridge.py` queues **every** IMU sample with Gazebo's `header.stamp` (`drain_imu()`, `use_imu_sample()`,
+>   `get_imu_time()`). `run_sim.py` steps the EKF once per queued sample, then the controller once. `FINAL_gps.py`
+>   takes `dt` from the sample stamps (`self._clock`) when the sensor provides them. SENSOR_LOG now writes one row
+>   per EKF step with `t` = IMU stamp, `tw` = wall time and `tt` = truth-pose stamp (used by `metrics.truth_arrays`).
+>   `EKF_IMU_TIMESTAMPS=0` restores the old latest-sample/arrival-time loop; harnesses that never drain the queue
+>   are unchanged. Test hook: `SIM_LOOP_STALL=prob,ms` freezes the loop on purpose.
+> - Live check: sim-time steps exactly 4.00 ms on all 18,742 rows (77 bunched arrivals handled); replay matches
+>   the live estimate to 0.003° / 1.7 cm.
+> - A/B under injected 150 ms stalls (~1/s), stops with realistic sensors, 3 trials each: old loop lost ~2,850
+>   samples and coasted 76 gaps, est tilt 0.70° / 2.48° and heading 1.41°. **New loop processed every sample (0
+>   gaps), 0.43° / 1.32° and 0.71° — the same as stall-free flight.** circle_fast with realistic sensors + 150 ms
+>   latency + stalls: 3/3, 0.62° / 1.98°. (The injected stalls didn't crash the old loop either; the original
+>   crash had 4–9 stalls/s plus delivery bursts.) The stall-coasting code stays as a backstop for genuinely lost
+>   samples (`imu_gap` faults, hardware dropouts).
+> - Offline suite unchanged (replay never used arrival time): bit-identical to `candidate_latency`.
+
 ## 5. Symptom → cause lookup (extended)
 
 | Symptom | Likely cause | Knob / change to consider |

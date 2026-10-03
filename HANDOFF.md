@@ -1,5 +1,22 @@
 # Handoff: PID cascade tuning against Gazebo/x500
 
+## 2026-10-03: EKF runs on IMU sample timestamps
+
+gz_bridge queues every IMU sample with Gazebo's header stamp; run_sim steps the EKF once per sample
+(then the controller once); FINAL_gps takes dt from the stamps. Under injected loop stalls the EKF
+now processes every sample (0 gaps vs 76 coasted gaps / ~2,850 lost samples with the old loop) and
+matches stall-free accuracy. EKF_IMU_TIMESTAMPS=0 = old behaviour; SIM_LOOP_STALL=p,ms = stall test
+hook. SENSOR_LOG rows are now per EKF step with t = IMU stamp (+ tw, tt columns). On hardware the
+same design maps to reading the IMU FIFO with its timestamps.
+
+## 2026-10-02 (later): delayed GPS fusion + safer stall handling
+
+Both fixes from the harder-scenario round are in FINAL_gps.py: GPS fixes fused against the state at
+measurement time (`gps_latency` from the sensor object / EKF_GPS_LATENCY_MS), and stall coasting that
+decays roll/pitch rates (holds yaw) + blocks GPS->attitude for 1 s after a stall. Live circle_fast with
+realistic sensors + 150 ms latency 0/3 -> 3/3. Still open before hardware: integrate on IMU message
+timestamps (stops t3 crash = IMU delivery bursts). Reference results: testing/results/candidate_latency.
+
 ## 2026-10-02: harder scenarios - GPS latency + live realistic sensors
 
 `gps_latency` suite fault + `PID/sim_degrade.py` (SIM_REALISTIC=1, SIM_GPS_LATENCY_MS=N; off by default).

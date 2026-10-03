@@ -266,6 +266,8 @@ class CalRecorder:
     def __init__(self, bridge):
         self._b = bridge
         self.mag_reference = bridge.mag_reference
+        self.gps_latency = getattr(bridge, "gps_latency", 0.0)
+        self.use_timestamps = getattr(bridge, "use_timestamps", False)
         self.recording = True
         self.reads = {"gyro": [], "mag": [], "accel": []}
 
@@ -289,6 +291,9 @@ class CalRecorder:
     def get_gps(self):
         return self._b.get_gps()
 
+    def get_imu_time(self):
+        return self._b.get_imu_time()
+
     def save(self, path):
         self.recording = False
         with open(path, "w") as f:
@@ -305,6 +310,11 @@ def main():
         rec = CalRecorder(bridge)
         ekf = DroneEKF(sensors=rec)
         rec.save(SENSOR_LOG + ".cal.csv")
+        # what replay needs to reproduce this run that isn't in the csv columns
+        import json
+        with open(SENSOR_LOG + ".meta.json", "w") as f:
+            json.dump({"gps_latency_s": ekf.gps_latency,
+                       "env": {k: v for k, v in os.environ.items() if k.startswith(("SIM_", "EKF_", "CAL_TURN", "MISSION", "ORACLE"))}}, f)
     else:
         ekf = DroneEKF(sensors=bridge)
     limits = run_limits()
@@ -322,9 +332,11 @@ def main():
     log = open(SENSOR_LOG, "w") if SENSOR_LOG else None
     if log:
         # mt..evz appended 2026-09-30 for the test suite (mission time, setpoint, the EKF's
-        # live estimate) - replay_ekf.py reads columns by name, so older csvs still work
+        # live estimate) - replay_ekf.py reads columns by name, so older csvs still work.
+        # 2026-10-03: one row per EKF step; t = the IMU sample's sim-time stamp (replay then
+        # reproduces the EKF's dt exactly), tw = wall time, tt = the truth pose's own stamp.
         log.write("t,gx,gy,gz,ax,ay,az,mx,my,mz,px,py,pz,vx,vy,vz,tqw,tqx,tqy,tqz,tpx,tpy,tpz,"
-                  "mt,spx,spy,spz,spyaw,eqw,eqx,eqy,eqz,epx,epy,epz,evx,evy,evz\n")
+                  "mt,spx,spy,spz,spyaw,eqw,eqx,eqy,eqz,epx,epy,epz,evx,evy,evz,tw,tt\n")
     if ORACLE:
         print("ORACLE MODE - controller is flying on Gazebo ground truth, not the EKF", flush=True)
     print(bridge.degrade.describe(), flush=True)
@@ -332,27 +344,54 @@ def main():
     last_t = time.time()
     start_t = last_t
     i = 0
+    # 2026-10-03: step the EKF once per queued IMU sample (gz_bridge.drain_imu), each on its
+    # own sim-time stamp, then run the controller once - a loop stall or a delivery burst
+    # no longer loses samples. EKF_IMU_TIMESTAMPS=0 restores the old one-latest-sample loop.
+    queued = getattr(bridge, "use_timestamps", False)
+    if queued:
+        bridge.drain_imu(0.0)  # discard samples that piled up during calibration
+    # test-only: SIM_LOOP_STALL=prob,ms freezes the loop for ms with probability prob per
+    # iteration (host hiccups on demand, for testing stall handling)
+    stall = os.environ.get("SIM_LOOP_STALL")
+    stall_p, stall_s = (float(stall.split(",")[0]), float(stall.split(",")[1]) / 1000.0) if stall else (0.0, 0.0)
+    stall_rng = np.random.default_rng(int(os.environ.get("SIM_SEED", "1")))
+    print(f"IMU {'queued, sample timestamps' if queued else 'latest sample, arrival time'}"
+          + (f"; injected loop stalls p={stall_p} {stall_s*1000:.0f}ms" if stall else ""), flush=True)
+    est_state = state = None
     print("running - Ctrl+C to stop", flush=True)
     while True:
-        bridge.wait_for_imu()  # paces the loop to real sensor arrival - see that method's comment
-        state = ekf.step()
-        est_state = state
-        if ORACLE:
-            state = oracle_state(bridge, est_state)
-
+        if stall_p and stall_rng.random() < stall_p:
+            time.sleep(stall_s)
+        if queued:
+            samples = bridge.drain_imu()   # paces the loop to sensor arrival, like wait_for_imu
+        else:
+            bridge.wait_for_imu()          # paces the loop to real sensor arrival - see that method's comment
+            samples = [None]
         now = time.time()
         if mission is not None:
             if now - start_t > mission.total:
                 print(f"MISSION_END {MISSION} t={now - start_t:.2f}", flush=True)
                 break
             setpoint = mission(now - start_t)
-        if log:
-            tq, tp = bridge.get_true_pose()
-            tq, tp = tq or (1.0, 0.0, 0.0, 0.0), tp or (0.0, 0.0, 0.0)
-            row = (now, *bridge.get_gyro(), *bridge.get_accel(), *bridge.get_mag(), *bridge.get_gps(), *tq, *tp,
-                   now - start_t, *setpoint["pos"], setpoint["yaw"],
-                   *est_state["quat"], *est_state["pos"], *est_state["vel"])
-            log.write(",".join(f"{v:.6f}" for v in row) + "\n")
+        for sample in samples:
+            if sample is not None:
+                bridge.use_imu_sample(sample)
+            est_state = ekf.step()
+            if log:
+                tq, tp = bridge.get_true_pose()
+                tq, tp = tq or (1.0, 0.0, 0.0, 0.0), tp or (0.0, 0.0, 0.0)
+                t_row = bridge.get_imu_time() if queued else now
+                tt = bridge.get_true_stamp() if queued else now
+                row = (t_row, *bridge.get_gyro(), *bridge.get_accel(), *bridge.get_mag(), *bridge.get_gps(), *tq, *tp,
+                       now - start_t, *setpoint["pos"], setpoint["yaw"],
+                       *est_state["quat"], *est_state["pos"], *est_state["vel"], now, tt if tt is not None else t_row)
+                log.write(",".join(f"{v:.6f}" for v in row) + "\n")
+        if est_state is None:
+            continue
+        state = est_state
+        if ORACLE:
+            state = oracle_state(bridge, est_state)
+
         dt = min(now - last_t, MAX_DT)
         last_t = now
 

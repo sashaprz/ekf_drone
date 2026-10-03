@@ -75,7 +75,9 @@ def truth_arrays(cols, lag=TRUTH_LAG_S):
     tp = np.stack([cols["tpx"], cols["tpy"], cols["tpz"]], axis=1)
     new = np.r_[True, np.any(np.diff(tq, axis=0) != 0, axis=1) | np.any(np.diff(tp, axis=0) != 0, axis=1)]
     ku = np.flatnonzero(new)
-    tu = t[ku] - lag
+    # recordings since 2026-10-03 carry the pose message's own stamp (tt, same clock as t):
+    # place each pose where it was measured, not where it was logged
+    tu = cols["tt"][ku] if "tt" in cols else t[ku] - lag
     qu, pu = tq[ku].copy(), tp[ku]
     for k in range(1, len(qu)):  # keep consecutive samples in the same hemisphere for nlerp
         if np.dot(qu[k], qu[k - 1]) < 0:

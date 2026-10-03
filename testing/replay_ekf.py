@@ -68,8 +68,16 @@ def load_cal(csv_path):
             "accel": [(r["ax"], r["ay"], r["az"]) for r in rows]}
 
 
+def load_meta(csv_path):
+    # <csv>.meta.json written by run_sim.py since 2026-10-02 (e.g. gps_latency_s); {} if absent
+    import json
+    path = csv_path + ".meta.json"
+    return json.load(open(path)) if os.path.exists(path) else {}
+
+
 class Replay:
     mag_reference = MAG_REFERENCE_ENU
+    gps_latency = 0.0   # seconds - the EKF reads it (delayed GPS fusion); see load_meta
 
     def __init__(self, rows, remapped=None, cal=None):
         self.rows = rows
@@ -224,7 +232,9 @@ def main():
                   f"pos_err=({pe[0]:5.2f},{pe[1]:5.2f},{pe[2]:6.2f}) "
                   f"abias=({ekf.accel_bias_x:+.3f},{ekf.accel_bias_y:+.3f},{ekf.accel_bias_z:+.3f})")
 
-    run_replay(Replay(rows, cal=load_cal(path)), [r["t"] for r in rows], on_step,
+    src = Replay(rows, cal=load_cal(path))
+    src.gps_latency = load_meta(path).get("gps_latency_s", 0.0)
+    run_replay(src, [r["t"] for r in rows], on_step,
                exp=os.environ.get("EXP", ""), t_end=float(os.environ.get("T_END", "1e9")))
     att_err = np.abs(np.array(att_err)); pos_err = np.abs(np.array(pos_err))
     print(f"att_err deg  rms={np.sqrt((att_err**2).mean(0)).round(2)} max={att_err.max(0).round(1)}")
