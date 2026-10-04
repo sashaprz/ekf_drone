@@ -115,6 +115,18 @@ class Replay:
             return (r["my"], -r["mx"], -r["mz"])
         return (r["mx"], r["my"], r["mz"])
 
+    def get_mag_time(self):
+        # 'mgt' column (recordings since 2026-10-04); older recordings: a reading is new when
+        # its value changes (Gazebo/PX4 mags are noisy, so a repeat = the same held reading)
+        r = self._row()
+        if "mgt" in r:
+            return r["mgt"]
+        m = (r["mx"], r["my"], r["mz"])
+        if m != getattr(self, "_prev_mag", None):
+            self._prev_mag = m
+            self._mag_id = getattr(self, "_mag_id", 0) + 1
+        return self._mag_id
+
     def get_baro(self):
         # optional bt/bh columns (recordings since 2026-10-03); NaN = no baro sample yet
         r = self._row()
@@ -144,6 +156,15 @@ class ArrayReplay(Replay):
         self._p = list(zip(c["px"], c["py"], c["pz"], c["vx"], c["vy"], c["vz"]))
         self._ok = c.get("gps_ok")
         self._baro = list(zip(c["bt"], c["bh"])) if "bh" in c else None
+        if "mgt" in c:
+            self._mag_t = list(c["mgt"])
+        else:  # infer: a new reading wherever the value changes
+            ids, prev, k = [], None, 0
+            for m in zip(c["mx"], c["my"], c["mz"]):
+                if m != prev:
+                    k, prev = k + 1, m
+                ids.append(k)
+            self._mag_t = ids
 
     def _k(self):
         return 0 if self.calibrating else self.i
@@ -159,6 +180,9 @@ class ArrayReplay(Replay):
     def get_mag(self):
         if self.calibrating and self.cal: return self._cal_read("mag")
         return self._m[self._k()]
+
+    def get_mag_time(self):
+        return None if self.calibrating else self._mag_t[self.i]
 
     def get_baro(self):
         if self._baro is None or self.calibrating:

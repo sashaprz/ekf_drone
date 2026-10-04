@@ -457,6 +457,19 @@ judge pos/vel consistency on `gpsN`/`REAL` rows only (they read 0.7–2.2).
 >   realistic sensors + latency. The first GPS-loss version tipped over at touchdown and disarmed at 4.5 m true
 >   height — fixed by the level descent + stuck-detection.
 
+> **2026-10-04 (later): compass fused once per reading + PX4 bridge.**
+> - Mag used to be fused every IMU step (Gazebo mag 100 Hz → each reading ~2.5×; PX4 ~14 Hz → ~18×). Now once per
+>   reading (`get_mag_time` from the bridge, `mgt` log column, value-change inference for old recordings). Suite
+>   (`testing/results/candidate_magonce/` vs `candidate_latency`): median tilt 0.043° → 0.025°, heading 0.116° →
+>   0.081°, mag rejections −18 %, excl. NEES 299 → 300 PASS; 15 grade improvements / 21 regressions, almost all NEES
+>   (more underconfident). **One real regression: circle_fast + 5 s stale GPS 5.8° → 25° tilt max** — the known
+>   stale-GPS acceptance (F6), now less masked by the compass; next fix = reject fixes with an unchanged timestamp.
+> - GPS update accepts partial fixes (NaN components skipped, chi2 by dof) — full fixes bit-identical.
+> - `PID/px4_bridge.py` (BRIDGE=px4): MAVLink shadow bridge (HIGHRES_IMU 250 Hz with PX4 stamps + fields_updated,
+>   GPS_RAW_INT without vertical velocity, PX4 attitude/position as reference, field direction measured at start,
+>   never sends motors). SITL live test (`testing/suite/px4_live_shadow.sh`): 18 248 steps/75 s, your EKF vs PX4
+>   EKF2 tilt 0.25° RMS, heading +0.33°, position 2 cm / 9 cm. PX4 1.18-dev has no `EKF2_GPS_DELAY` → 110 ms fallback.
+
 ## 5. Symptom → cause lookup (extended)
 
 | Symptom | Likely cause | Knob / change to consider |

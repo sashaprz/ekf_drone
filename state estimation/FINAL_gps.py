@@ -30,6 +30,7 @@ import calibration
 k = 1 #how agressively to increase accel measurement noise when drone is accelerating.
 chi2_threshold = 11.34 #chi2 threshold for 3 DOF, 99% confidence interval - accel and mag corrections (3 DOF each)
 chi2_threshold_gps = 16.81 #chi2 threshold for 6 DOF, 99% confidence interval - GPS correction (position+velocity, 6 DOF)
+CHI2_99 = {1: 6.63, 2: 9.21, 3: 11.34, 4: 13.28, 5: 15.09, 6: chi2_threshold_gps}  # 99% by dof (partial GPS fixes)
 GRAVITY = 9.80665
 # 2026-09-27: defensive backstop, not the primary fix (see GazeboBridge.wait_for_imu()
 # for that) - caps a single predict step's dt so a genuine stall (WSL2/WSLg scheduling
@@ -337,6 +338,8 @@ class DroneEKF:
         self._get_gyro = get_gyro if sensors is None else sensors.get_gyro
         self._get_accel = get_accel if sensors is None else sensors.get_accel
         self._get_mag = get_mag if sensors is None else sensors.get_mag
+        self._get_mag_time = getattr(sensors, "get_mag_time", None) if sensors is not None else None
+        self._last_mag_stamp = None
         self._get_gps = get_gps if sensors is None else sensors.get_gps
         # world-frame mag field direction, 2026-09-30 - was hardcoded (1,0,0) (horizontal,
         # pointing along world x) in both the step() mag model and calibration. True for
@@ -564,6 +567,15 @@ class DroneEKF:
         self.q = quat_mult(self.q, dq)
         self.q = self.q / np.linalg.norm(self.q)
 
+    def _mag_is_new(self):
+        stamp = self._get_mag_time() if self._get_mag_time is not None else None
+        if stamp is None:
+            return True  # no timestamps from this sensor: fuse every step (pre-2026-10-04 behaviour)
+        if stamp == self._last_mag_stamp:
+            return False
+        self._last_mag_stamp = stamp
+        return True
+
     def _state_at(self, t):
         # predicted (position, velocity) at time t from the history, linearly interpolated;
         # the current state when there's no latency (bit-identical to the old behaviour)
@@ -715,15 +727,21 @@ class DroneEKF:
 
             #gps correction
             self.H_gps = update_H_gps(self.H_gps) #builds measurment jacobian for this update
-            S_gps = self.H_gps @ self.P @ self.H_gps.T + R_gps #how much uncertainty you'd expect in residual, combining current uncertainty with sensor noise R_gps
-            K_gps = self.P @ self.H_gps.T @ np.linalg.inv(S_gps) #computing kalman fain
+            # partial fixes, 2026-10-04: a component the receiver/link doesn't provide is NaN
+            # (MAVLink's GPS_RAW_INT has no vertical velocity) - fuse only the finite ones,
+            # gate with the matching chi2 dof. A full fix uses exactly the old matrices.
+            valid = np.isfinite(gps_measurement)
+            H_g = self.H_gps[valid]
+            R_g = R_gps[np.ix_(valid, valid)]
+            S_gps = H_g @ self.P @ H_g.T + R_g #how much uncertainty you'd expect in residual, combining current uncertainty with sensor noise R_gps
+            K_gps = self.P @ H_g.T @ np.linalg.inv(S_gps) #computing kalman fain
             # delayed fusion: compare the fix with the state when it was measured, not now
             # (2026-10-02 - with 150-200 ms latency, a fix compared with "now" under
             # sustained acceleration read a x latency ~0.4 m/s as attitude error; live
             # circle_fast with realistic sensors + 150 ms latency crashed 3/3)
             past_pos, past_vel = self._state_at(now - self.gps_latency)
             predicted_gps = np.concatenate([past_pos, past_vel]) #what you expect gps to report
-            residual_gps = gps_measurement - predicted_gps #what gps reported vs what you expected
+            residual_gps = (gps_measurement - predicted_gps)[valid] #what gps reported vs what you expected
             #gate against a bad fix (multipath, momentary bad geometry) - R_gps isn't
             #adaptively inflated like R_accel, so no separate "base" R is needed here
             d_squared_gps = residual_gps.T @ np.linalg.inv(S_gps) @ residual_gps
@@ -736,16 +754,18 @@ class DroneEKF:
             # sensors_oracle1.csv: est altitude ran to -115m after a bounce at t~11s while
             # truth hovered at 0-4m. After GPS_LOCKOUT_RESETS consecutive rejections, snap
             # pos/vel to the fix and re-open their covariance (PX4's EKF2 does the same).
-            if d_squared_gps > chi2_threshold_gps:
+            gate_gps = CHI2_99[int(valid.sum())]
+            if d_squared_gps > gate_gps:
                 self.gps_rejections += 1
                 self.stats["gps_rejected"] += 1
                 if self.gps_rejections >= GPS_LOCKOUT_RESETS:
                     self.stats["gps_resets"] += 1
                     print(f"EKF_GPS_RESET t={now:.3f} after {self.gps_rejections} rejections "
-                          f"d2={d_squared_gps:.1f} pos_err={residual_gps[0:3].round(2)}", flush=True)
+                          f"d2={d_squared_gps:.1f} pos_err={(gps_measurement - predicted_gps)[0:3].round(2)}", flush=True)
                     # the fix is gps_latency old: carry it forward by how far the state moved since
-                    new_pos = gps_measurement[0:3] + (self.position - past_pos)
-                    new_vel = gps_measurement[3:6] + (self.velocity - past_vel)
+                    # (components the fix lacks keep the current estimate)
+                    new_pos = np.where(valid[0:3], gps_measurement[0:3] + (self.position - past_pos), self.position)
+                    new_vel = np.where(valid[3:6], gps_measurement[3:6] + (self.velocity - past_vel), self.velocity)
                     self._shift_history(new_pos - self.position, new_vel - self.velocity)
                     self.position, self.velocity = new_pos, new_vel
                     self.P[6:12, :] = 0.0
@@ -755,7 +775,7 @@ class DroneEKF:
             else:
                 self.gps_rejections = 0
 
-            if d_squared_gps <= chi2_threshold_gps:
+            if d_squared_gps <= gate_gps:
                 self.stats["gps_updates"] += 1
                 if now < self._gps_att_hold_until:
                     # just after a stall: GPS may fix pos/vel only - see STALL_GPS_ATT_HOLD_S
@@ -766,7 +786,7 @@ class DroneEKF:
                 self._shift_history(correction[9:12], correction[6:9])
                 #Joseph form - numerically robust to floating-point drift (keeps P symmetric/PSD),
                 #vs the algebraically-equivalent but fragile (I-KH)@P
-                self.P = (I - K_gps @ self.H_gps) @ self.P @ (I - K_gps @ self.H_gps).T + K_gps @ R_gps @ K_gps.T
+                self.P = (I - K_gps @ H_g) @ self.P @ (I - K_gps @ H_g).T + K_gps @ R_g @ K_gps.T
                 #this is the second p update, after we incorporate a measuremnt uncertainty goes down bc that is another measurement source
             #else: skip entirely - state and P stay exactly as the predict step left them
             self.last_gps_time = now
@@ -821,45 +841,50 @@ class DroneEKF:
           self.P = (I - K_accel @ self.H_accel) @ self.P @ (I - K_accel @ self.H_accel).T + K_accel @ R_accel @ K_accel.T
         #else: skip entirely - state and P stay exactly as the predict step left them
 
-        #mag correction - predicted_mag uses q as it stands AFTER the accel correction just
-        #applied, not the stale pre-accel q - this is what actually removes the overcorrection
-        #risk, not just avoiding a bad P0 (see apply_correction's comment)
-        predicted_mag = rotate_by_quat(quat_conjugate(self.q), self._mag_ref)
-        self.H_mag = update_H_mag(predicted_mag, self.H_mag)
+        # 2026-10-04: fuse each magnetometer READING once. The mag used to be fused every IMU
+        # step whether or not a new reading had arrived - Gazebo's mag runs ~100 Hz, PX4 logs
+        # ~14 Hz, so each reading counted 2.5-18x as if independent: the filter was that much
+        # too confident in the compass. Sensors that give no timestamp keep the old behaviour.
+        if self._mag_is_new():
+            #mag correction - predicted_mag uses q as it stands AFTER the accel correction just
+            #applied, not the stale pre-accel q - this is what actually removes the overcorrection
+            #risk, not just avoiding a bad P0 (see apply_correction's comment)
+            predicted_mag = rotate_by_quat(quat_conjugate(self.q), self._mag_ref)
+            self.H_mag = update_H_mag(predicted_mag, self.H_mag)
 
-        S_mag = self.H_mag @ self.P @ self.H_mag.T + R_mag
-        K_mag = self.P @ self.H_mag.T @ np.linalg.inv(S_mag)
-        residual_mag = np.array([corrected_mag_x, corrected_mag_y, corrected_mag_z]) - predicted_mag
-        #gate against magnetic interference (motors/ESCs) - R_mag is static, not
-        #adaptively inflated like R_accel, so no separate "base" R is needed here
-        d_squared_mag = residual_mag.T @ np.linalg.inv(S_mag) @ residual_mag
-        self.last_d2["mag"] = float(d_squared_mag)
-        self.stats["mag_updates" if d_squared_mag <= chi2_threshold else "mag_rejected"] += 1
+            S_mag = self.H_mag @ self.P @ self.H_mag.T + R_mag
+            K_mag = self.P @ self.H_mag.T @ np.linalg.inv(S_mag)
+            residual_mag = np.array([corrected_mag_x, corrected_mag_y, corrected_mag_z]) - predicted_mag
+            #gate against magnetic interference (motors/ESCs) - R_mag is static, not
+            #adaptively inflated like R_accel, so no separate "base" R is needed here
+            d_squared_mag = residual_mag.T @ np.linalg.inv(S_mag) @ residual_mag
+            self.last_d2["mag"] = float(d_squared_mag)
+            self.stats["mag_updates" if d_squared_mag <= chi2_threshold else "mag_rejected"] += 1
 
-        # lockout recovery - see MAG_LOCKOUT_STEPS's comment
-        if d_squared_mag > chi2_threshold:
-            self.mag_rejections += 1
-            if MAG_LOCKOUT_STEPS and self.mag_rejections >= MAG_LOCKOUT_STEPS:
-                up_body = rotate_by_quat(quat_conjugate(self.q), np.array([0.0, 0.0, 1.0]))
-                m = np.array([corrected_mag_x, corrected_mag_y, corrected_mag_z])
-                dip = math.acos(np.clip(m @ up_body / np.linalg.norm(m), -1, 1))
-                dip_ref = math.acos(np.clip(self._mag_ref[2], -1, 1))
-                if abs(dip - dip_ref) < MAG_DIP_TOL:
-                    self.P[0:3, 0:3] += np.eye(3) * MAG_RESET_STD ** 2
-                    self.stats["mag_resets"] += 1
-                    # re-run this tick's mag update against the re-opened P
-                    S_mag = self.H_mag @ self.P @ self.H_mag.T + R_mag
-                    K_mag = self.P @ self.H_mag.T @ np.linalg.inv(S_mag)
-                    d_squared_mag = residual_mag.T @ np.linalg.inv(S_mag) @ residual_mag
+            # lockout recovery - see MAG_LOCKOUT_STEPS's comment
+            if d_squared_mag > chi2_threshold:
+                self.mag_rejections += 1
+                if MAG_LOCKOUT_STEPS and self.mag_rejections >= MAG_LOCKOUT_STEPS:
+                    up_body = rotate_by_quat(quat_conjugate(self.q), np.array([0.0, 0.0, 1.0]))
+                    m = np.array([corrected_mag_x, corrected_mag_y, corrected_mag_z])
+                    dip = math.acos(np.clip(m @ up_body / np.linalg.norm(m), -1, 1))
+                    dip_ref = math.acos(np.clip(self._mag_ref[2], -1, 1))
+                    if abs(dip - dip_ref) < MAG_DIP_TOL:
+                        self.P[0:3, 0:3] += np.eye(3) * MAG_RESET_STD ** 2
+                        self.stats["mag_resets"] += 1
+                        # re-run this tick's mag update against the re-opened P
+                        S_mag = self.H_mag @ self.P @ self.H_mag.T + R_mag
+                        K_mag = self.P @ self.H_mag.T @ np.linalg.inv(S_mag)
+                        d_squared_mag = residual_mag.T @ np.linalg.inv(S_mag) @ residual_mag
+                    self.mag_rejections = 0
+            else:
                 self.mag_rejections = 0
-        else:
-            self.mag_rejections = 0
 
-        if d_squared_mag <= chi2_threshold:
-            self.apply_correction(K_mag @ residual_mag)
-            #this is the second p update, after we incorporate a measuremnt uncertainty goes down bc that is another measurement source
-            self.P = (I - K_mag @ self.H_mag) @ self.P @ (I - K_mag @ self.H_mag).T + K_mag @ R_mag @ K_mag.T
-        #else: skip entirely - state and P stay exactly as the predict step left them
+            if d_squared_mag <= chi2_threshold:
+                self.apply_correction(K_mag @ residual_mag)
+                #this is the second p update, after we incorporate a measuremnt uncertainty goes down bc that is another measurement source
+                self.P = (I - K_mag @ self.H_mag) @ self.P @ (I - K_mag @ self.H_mag).T + K_mag @ R_mag @ K_mag.T
+            #else: skip entirely - state and P stay exactly as the predict step left them
 
         #loop timing
         self.last_time = now

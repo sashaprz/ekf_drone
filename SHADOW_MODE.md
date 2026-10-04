@@ -16,7 +16,7 @@ PX4, then convert the log and replay your EKF on it.
 |---|---|---|
 | `SDLOG_PROFILE` | 3 | default set + "Estimator replay": IMU, mag, baro, GPS at **full rate** (default logs mag/baro at 5 Hz) |
 | `SDLOG_MODE` | 1 | log from boot, so the log contains the vehicle at rest before arming (→ calibration dwell) |
-| `EKF2_GPS_DELAY` | your receiver's latency (default 110 ms) | read by the converter and used by your EKF's delayed GPS fusion |
+| `EKF2_GPS_DELAY` | your receiver's latency (default 110 ms) | read by the converter/bridge for your EKF's delayed GPS fusion. **Only exists on PX4 ≤ 1.15** - newer PX4 dropped it; then 110 ms is assumed, or set `EKF_GPS_LATENCY_MS` |
 
 **Before the first flights (bench):** PX4's own accel calibration (6 orientations), mag
 calibration (rotate through all orientations, ideally also *compass-motor calibration* with
@@ -57,16 +57,29 @@ Rates seen: IMU 250 Hz, GPS 31 Hz, baro 20 Hz, mag 14 Hz.
 
 ## Known issues to fix before/while doing this
 
-- **Mag is fused every IMU step even when no new reading arrived.** PX4 delivers mag at
-  ~14 Hz (Gazebo ~100 Hz), so each reading is fused ~18× as if independent → overconfident in
-  the compass. Baro already fuses only new samples (`_last_baro_stamp`); mag should do the same.
-  Likely part of why tilt was 0.25° vs EKF2's 0.03° in the SITL test.
+- ~~Mag fused every IMU step~~ **fixed 2026-10-04**: each reading is fused once (stamps from the
+  bridge / log `mgt` column). On the SITL log it changed tilt only 0.25° → 0.24° and heading
+  0.75° → 0.66°, so it is NOT what separates your tilt from EKF2's 0.03° - still open.
+- **Stale GPS**: a frozen fix is still accepted (suite `gps_stale`); with the compass now weighted
+  correctly, circle_fast + 5 s stale GPS reaches 25° tilt error. Fix next: reject a fix whose
+  timestamp hasn't changed (the bridge has GPS_RAW_INT.time_usec) - same idea as the mag fix.
 - **Accel bias stays pinned** (unpinning diverged in sim) — rely on PX4's 6-point accel cal.
 - **`Q_att` is ~1000× gyro noise** — tune from real data (step 5 above), not from the sim.
 - The magnetic-field direction must come from the data (converter) or the WMM for your
   location — not Gazebo's `MAG_REFERENCE_ENU`.
 
-## Stage 2 — live shadow on the Pi
+## Stage 2 — live shadow on the Pi  (bridge written: `PID/px4_bridge.py`)
+
+**Status 2026-10-04: implemented and tested against PX4 SITL** (`testing/suite/px4_live_shadow.sh`):
+`BRIDGE=px4 PX4_URL=... SENSOR_LOG=x.csv RUN_SECONDS=300 python3 run_sim.py` runs your EKF +
+controller live on PX4's MAVLink stream (HIGHRES_IMU 250 Hz with PX4 timestamps, GPS_RAW_INT,
+PX4's attitude/position as reference) and never sends motor commands. SITL result over a
+takeoff-hover-land: 250 Hz with clean 4 ms stamps, mag 14 Hz fused once per reading, baro 20 Hz,
+GPS fused without vertical velocity (MAVLink doesn't carry it); your live estimate vs PX4's:
+tilt 0.25° RMS, heading +0.33°, position 2 cm / 9 cm. On the Pi: `PX4_URL=/dev/serial0`
+(or `/dev/ttyAMA0`), `PX4_BAUD=921600`, PX4 `MAV_1_CONFIG=TELEM 2`, `MAV_1_MODE=Onboard`,
+`SER_TEL2_BAUD=921600`.
+
 
 Same EKF, running live on the Pi from PX4's sensor stream, still not controlling anything —
 this tests timing and the data link, which Stage 1 can't.

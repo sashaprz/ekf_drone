@@ -105,7 +105,8 @@ def main():
     gyro = vec(imu, "gyro_rad") * FRD2FLU
     accel = vec(imu, "accelerometer_m_s2") * FRD2FLU
     tm = mag.get("timestamp_sample", mag["timestamp"]) * 1e-6
-    m_raw, _ = hold(tm, vec(mag, "magnetometer_ga") * FRD2FLU, t)
+    m_raw, mi = hold(tm, vec(mag, "magnetometer_ga") * FRD2FLU, t)
+    mgt = tm[mi]  # each row's mag-reading stamp - the EKF fuses each reading once
 
     # calibration dwell: first run of cal-samples IMU samples at rest (before arming)
     rest = (np.linalg.norm(gyro, axis=1) < 0.03) & (np.abs(np.linalg.norm(accel, axis=1) - 9.80665) < 0.3)
@@ -173,13 +174,13 @@ def main():
     os.makedirs(os.path.dirname(os.path.abspath(a.csv)), exist_ok=True)
     cols = ["t", "gx", "gy", "gz", "ax", "ay", "az", "mx", "my", "mz", "px", "py", "pz", "vx", "vy", "vz",
             "tqw", "tqx", "tqy", "tqz", "tpx", "tpy", "tpz", "mt", "spx", "spy", "spz", "spyaw",
-            "eqw", "eqx", "eqy", "eqz", "epx", "epy", "epz", "evx", "evy", "evz", "tw", "tt", "bt", "bh"]
+            "eqw", "eqx", "eqy", "eqz", "epx", "epy", "epz", "evx", "evy", "evz", "tw", "tt", "bt", "bh", "mgt"]
     f0 = flight.start
     n = len(t) - f0
     z = np.zeros(n)
     evel = evel if evel is not None else np.zeros((len(t), 3))
     data = np.column_stack([t[f0:], gyro[f0:], accel[f0:], m[f0:], g_rows[f0:], tq[f0:], tpos[f0:],
-                            t[f0:] - t[f0], z, z, z, z, eq[f0:], epos[f0:], evel[f0:], t[f0:], tt[f0:], bt[f0:], bh[f0:]])
+                            t[f0:] - t[f0], z, z, z, z, eq[f0:], epos[f0:], evel[f0:], t[f0:], tt[f0:], bt[f0:], bh[f0:], mgt[f0:]])
     np.savetxt(a.csv, data, delimiter=",", header=",".join(cols), comments="", fmt="%.6f")
     with open(a.csv + ".cal.csv", "w") as fcal:
         fcal.write("gx,gy,gz,mx,my,mz,ax,ay,az\n")

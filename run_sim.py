@@ -8,7 +8,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "state estimation"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "PID"))
 
 from FINAL_gps import DroneEKF
-from gz_bridge import GazeboBridge
+# BRIDGE=px4: live shadow mode on the real drone (PID/px4_bridge.py, MAVLink) - same
+# interface as the Gazebo bridge, never sends motor commands. Default: Gazebo.
+if os.environ.get("BRIDGE") == "px4":
+    from px4_bridge import Px4Bridge as GazeboBridge
+else:
+    from gz_bridge import GazeboBridge
 import cascade
 import failsafe
 
@@ -298,6 +303,9 @@ class CalRecorder:
     def get_baro(self):
         return self._b.get_baro()
 
+    def get_mag_time(self):
+        return self._b.get_mag_time()
+
     def save(self, path):
         self.recording = False
         with open(path, "w") as f:
@@ -317,7 +325,7 @@ def main():
         # what replay needs to reproduce this run that isn't in the csv columns
         import json
         with open(SENSOR_LOG + ".meta.json", "w") as f:
-            json.dump({"gps_latency_s": ekf.gps_latency,
+            json.dump({"gps_latency_s": ekf.gps_latency, "mag_reference": [float(x) for x in ekf._mag_ref],
                        "env": {k: v for k, v in os.environ.items() if k.startswith(("SIM_", "EKF_", "CAL_TURN", "MISSION", "ORACLE"))}}, f)
     else:
         ekf = DroneEKF(sensors=bridge)
@@ -340,7 +348,7 @@ def main():
         # 2026-10-03: one row per EKF step; t = the IMU sample's sim-time stamp (replay then
         # reproduces the EKF's dt exactly), tw = wall time, tt = the truth pose's own stamp.
         log.write("t,gx,gy,gz,ax,ay,az,mx,my,mz,px,py,pz,vx,vy,vz,tqw,tqx,tqy,tqz,tpx,tpy,tpz,"
-                  "mt,spx,spy,spz,spyaw,eqw,eqx,eqy,eqz,epx,epy,epz,evx,evy,evz,tw,tt,bt,bh,fs\n")
+                  "mt,spx,spy,spz,spyaw,eqw,eqx,eqy,eqz,epx,epy,epz,evx,evy,evz,tw,tt,bt,bh,fs,mgt\n")
     if ORACLE:
         print("ORACLE MODE - controller is flying on Gazebo ground truth, not the EKF", flush=True)
     print(bridge.degrade.describe(), flush=True)
@@ -371,6 +379,10 @@ def main():
     nan_at = float(os.environ.get("SIM_NAN_AT", "0"))
     hang_at = float(os.environ.get("SIM_HANG_AT", "0"))
     nan_done = False
+    run_seconds = float(os.environ.get("RUN_SECONDS", "0"))  # e.g. shadow runs: stop after N s
+    shadow = getattr(bridge, "shadow", False)
+    if shadow:
+        say("SHADOW MODE: estimating + computing control on PX4's sensors; nothing is sent to the motors")
     disarm_t = None
     nan6 = (float("nan"),) * 6
     est_state = state = None
@@ -396,6 +408,9 @@ def main():
             nan_done = True
         mission_setpoint = mission(mt) if mission is not None else {"pos": np.array([0.0, 0.0, 2.0]), "yaw": 0.0}
         mission_done = mission is not None and mt > mission.total
+        if run_seconds and mt > run_seconds:
+            print(f"RUN_END t={mt:.2f}", flush=True)
+            break
         for sample in samples:
             if sample is not None:
                 bridge.use_imu_sample(sample)
@@ -408,7 +423,8 @@ def main():
                 row = (t_row, *bridge.get_gyro(), *bridge.get_accel(), *bridge.get_mag(), *(bridge.get_gps() or nan6), *tq, *tp,
                        mt, *setpoint["pos"], setpoint["yaw"],
                        *est_state["quat"], *est_state["pos"], *est_state["vel"], now, tt if tt is not None else t_row,
-                       *(bridge.get_baro() or (float("nan"), float("nan"))), failsafe.MODE_CODE[monitor.mode])
+                       *(bridge.get_baro() or (float("nan"), float("nan"))), failsafe.MODE_CODE[monitor.mode],
+                       bridge.get_mag_time() if bridge.get_mag_time() is not None else float("nan"))
                 log.write(",".join(f"{v:.6f}" for v in row) + "\n")
         if est_state is None:
             continue
@@ -419,7 +435,7 @@ def main():
             if disarm_t is None:
                 disarm_t = now
                 say(f"DISARMED t={mt:.2f} ({monitor.reason})")
-            if now - disarm_t > 1.0:
+            if now - disarm_t > 1.0 and not shadow:   # shadow: PX4 is flying - keep estimating
                 print(f"MISSION_END {MISSION} t={mt:.2f} ({monitor.reason})", flush=True)
                 break
             continue

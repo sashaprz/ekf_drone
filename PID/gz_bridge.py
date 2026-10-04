@@ -76,6 +76,7 @@ class GazeboBridge:
         self._accel_clean = (0.0, 0.0, 0.0)
         self._mag = (1.0, 0.0, 0.0)
         self._mag_scale = None  # field strength of the first reading - see _on_mag
+        self._mag_time = None
         # world-frame field direction for FINAL_gps.py's mag model - see MAG_REFERENCE_ENU
         self.mag_reference = MAG_REFERENCE_ENU
         self._gps = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
@@ -173,6 +174,8 @@ class GazeboBridge:
         if self._mag_scale:
             v = v / self._mag_scale
         self._mag = self.degrade.mag(tuple(v))
+        st = msg.header.stamp
+        self._mag_time = st.sec + st.nsec * 1e-9  # the EKF fuses each reading once (get_mag_time)
 
     def _on_gps(self, msg):
         if self._home_lat is None:
@@ -272,6 +275,9 @@ class GazeboBridge:
 
     def get_mag(self):
         return self._mag
+
+    def get_mag_time(self):
+        return self._mag_time
 
     def get_gps(self):
         if self.degrade.active and self._gps_seen:

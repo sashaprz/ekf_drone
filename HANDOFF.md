@@ -1,5 +1,13 @@
 # Handoff: PID cascade tuning against Gazebo/x500
 
+## 2026-10-04 (later): compass fused once per reading; PX4 shadow bridge
+
+Mag is now fused once per reading (was every IMU step). `PID/px4_bridge.py` + `BRIDGE=px4` runs the
+whole stack live on PX4's MAVLink stream without sending motors - tested in SITL
+(`testing/suite/px4_live_shadow.sh`). GPS updates accept partial fixes. Next filter item: reject stale
+GPS fixes by timestamp (circle_fast + 5 s stale GPS now reaches 25 deg). Compare against
+`testing/results/candidate_magonce`.
+
 ## 2026-10-04: hardware prep - barometer, failsafes, shadow-mode pipeline, timing benchmark
 
 Target hardware: Pixhawk + PX4, Raspberry Pi companion. Read `SHADOW_MODE.md` for the plan.
