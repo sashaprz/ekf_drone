@@ -115,6 +115,13 @@ class Replay:
             return (r["my"], -r["mx"], -r["mz"])
         return (r["mx"], r["my"], r["mz"])
 
+    def get_baro(self):
+        # optional bt/bh columns (recordings since 2026-10-03); NaN = no baro sample yet
+        r = self._row()
+        if "bh" not in r or r["bh"] != r["bh"]:
+            return None
+        return (r["bt"], r["bh"])
+
     def get_gps(self):
         # optional "gps_ok" column (testing/suite/faults.py): 0 = receiver has no fix
         r = self._row()
@@ -136,6 +143,7 @@ class ArrayReplay(Replay):
         self._m = list(zip(*m))
         self._p = list(zip(c["px"], c["py"], c["pz"], c["vx"], c["vy"], c["vz"]))
         self._ok = c.get("gps_ok")
+        self._baro = list(zip(c["bt"], c["bh"])) if "bh" in c else None
 
     def _k(self):
         return 0 if self.calibrating else self.i
@@ -151,6 +159,12 @@ class ArrayReplay(Replay):
     def get_mag(self):
         if self.calibrating and self.cal: return self._cal_read("mag")
         return self._m[self._k()]
+
+    def get_baro(self):
+        if self._baro is None or self.calibrating:
+            return None
+        b = self._baro[self.i]
+        return None if b[1] != b[1] else b
 
     def get_gps(self):
         k = self._k()
@@ -233,7 +247,10 @@ def main():
                   f"abias=({ekf.accel_bias_x:+.3f},{ekf.accel_bias_y:+.3f},{ekf.accel_bias_z:+.3f})")
 
     src = Replay(rows, cal=load_cal(path))
-    src.gps_latency = load_meta(path).get("gps_latency_s", 0.0)
+    meta = load_meta(path)
+    src.gps_latency = meta.get("gps_latency_s", 0.0)
+    if "mag_reference" in meta:
+        src.mag_reference = tuple(meta["mag_reference"])
     run_replay(src, [r["t"] for r in rows], on_step,
                exp=os.environ.get("EXP", ""), t_end=float(os.environ.get("T_END", "1e9")))
     att_err = np.abs(np.array(att_err)); pos_err = np.abs(np.array(pos_err))

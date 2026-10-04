@@ -1,0 +1,182 @@
+{
+ "meta": {
+  "dirty": true,
+  "env": [
+   "SIM_GPS_LOSS_AT=20"
+  ],
+  "filter_sha1": {
+   "state estimation/FINAL_gps.py": "6534bdbba048",
+   "state estimation/calibration.py": "f891872e7efd"
+  },
+  "git": "2ea4f28",
+  "tag": "fs_gpsloss_v2"
+ },
+ "missions": {
+  "hover": {
+   "oracle_tracking": {
+    "track_h_max_m": 0.0013640384891930285,
+    "track_h_rms_m": 0.000564496870467682,
+    "track_v_rms_m": 0.0120995659364997
+   },
+   "summary": {
+    "est_pitch_mean_deg": {
+     "max": 0.0027888943623306274,
+     "mean": 0.0021520706525911103,
+     "min": 0.0015152469428515928
+    },
+    "est_pos_h_rms_m": {
+     "max": 2.321644814078037,
+     "mean": 1.7939115399552883,
+     "min": 1.2661782658325396
+    },
+    "est_pos_v_max_m": {
+     "max": 0.4102462000000002,
+     "mean": 0.3965497000000001,
+     "min": 0.3828532
+    },
+    "est_pos_v_rms_m": {
+     "max": 0.30259056264901424,
+     "mean": 0.2362211787915574,
+     "min": 0.1698517949341006
+    },
+    "est_roll_mean_deg": {
+     "max": 0.06257544326196135,
+     "mean": 0.0014907126447215417,
+     "min": -0.059594017972518266
+    },
+    "est_tilt_max_deg": {
+     "max": 3.845378228966267,
+     "mean": 3.169406987594949,
+     "min": 2.4934357462236307
+    },
+    "est_tilt_rms_deg": {
+     "max": 0.5326098205536837,
+     "mean": 0.46007656107508377,
+     "min": 0.3875433015964838
+    },
+    "est_vel_h_rms_ms": {
+     "max": 0.5469161013732722,
+     "mean": 0.4454188736822287,
+     "min": 0.34392164599118524
+    },
+    "est_yaw_mean_signed_deg": {
+     "max": 0.10183179127418526,
+     "mean": -0.019112783568973654,
+     "min": -0.14005735841213257
+    },
+    "est_yaw_rms_deg": {
+     "max": 1.0519533840628084,
+     "mean": 0.9131484539459316,
+     "min": 0.7743435238290548
+    },
+    "flight_s": {
+     "max": 33.008,
+     "mean": 32.066,
+     "min": 31.124
+    },
+    "gps_resets_printed": {
+     "max": 0.0,
+     "mean": 0.0,
+     "min": 0.0
+    },
+    "max_true_tilt_deg": {
+     "max": 0.4192915099596813,
+     "mean": 0.30281728806229247,
+     "min": 0.18634306616490368
+    },
+    "n": 2,
+    "survived": 2,
+    "track_h_max_m": {
+     "max": 0.023425933706044677,
+     "mean": 0.019924040305988155,
+     "min": 0.016422146905931637
+    },
+    "track_h_rms_m": {
+     "max": 0.020047069547380874,
+     "mean": 0.014257743896551376,
+     "min": 0.008468418245721879
+    },
+    "track_v_rms_m": {
+     "max": 1.1832657707317475,
+     "mean": 1.175963928899989,
+     "min": 1.1686620870682305
+    },
+    "trial": {
+     "max": 2.0,
+     "mean": 1.5,
+     "min": 1.0
+    },
+    "true_tilt_max_profile_deg": {
+     "max": 0.4192915099596813,
+     "mean": 0.30281728806229247,
+     "min": 0.18634306616490368
+    },
+    "unplanned_ground_s": {
+     "max": 0.0,
+     "mean": 0.0,
+     "min": 0.0
+    }
+   },
+   "trials": [
+    {
+     "completed": true,
+     "ended_by": "no accepted GPS for 3.0 s",
+     "est_pitch_mean_deg": 0.0027888943623306274,
+     "est_pos_h_rms_m": 2.321644814078037,
+     "est_pos_v_max_m": 0.3828532,
+     "est_pos_v_rms_m": 0.1698517949341006,
+     "est_roll_mean_deg": 0.06257544326196135,
+     "est_tilt_max_deg": 3.845378228966267,
+     "est_tilt_rms_deg": 0.5326098205536837,
+     "est_vel_h_rms_ms": 0.5469161013732722,
+     "est_yaw_mean_signed_deg": 0.10183179127418526,
+     "est_yaw_rms_deg": 1.0519533840628084,
+     "failsafe_events": [
+      "FAILSAFE NORMAL -> LAND: no accepted GPS for 3.0 s",
+      "FAILSAFE LAND -> DISARMED: landed",
+      "DISARMED t=32.01 (landed)"
+     ],
+     "flight_s": 33.008,
+     "gps_resets_printed": 0,
+     "max_true_tilt_deg": 0.4192915099596813,
+     "survived": true,
+     "track_h_max_m": 0.016422146905931637,
+     "track_h_rms_m": 0.008468418245721879,
+     "track_v_rms_m": 1.1832657707317475,
+     "trial": 1,
+     "true_tilt_max_profile_deg": 0.4192915099596813,
+     "unplanned_ground_s": 0.0
+    },
+    {
+     "completed": true,
+     "ended_by": "no accepted GPS for 3.0 s",
+     "est_pitch_mean_deg": 0.0015152469428515928,
+     "est_pos_h_rms_m": 1.2661782658325396,
+     "est_pos_v_max_m": 0.4102462000000002,
+     "est_pos_v_rms_m": 0.30259056264901424,
+     "est_roll_mean_deg": -0.059594017972518266,
+     "est_tilt_max_deg": 2.4934357462236307,
+     "est_tilt_rms_deg": 0.3875433015964838,
+     "est_vel_h_rms_ms": 0.34392164599118524,
+     "est_yaw_mean_signed_deg": -0.14005735841213257,
+     "est_yaw_rms_deg": 0.7743435238290548,
+     "failsafe_events": [
+      "FAILSAFE NORMAL -> LAND: no accepted GPS for 3.0 s",
+      "FAILSAFE LAND -> DISARMED: landed",
+      "DISARMED t=30.13 (landed)"
+     ],
+     "flight_s": 31.124,
+     "gps_resets_printed": 0,
+     "max_true_tilt_deg": 0.18634306616490368,
+     "survived": true,
+     "track_h_max_m": 0.023425933706044677,
+     "track_h_rms_m": 0.020047069547380874,
+     "track_v_rms_m": 1.1686620870682305,
+     "trial": 2,
+     "true_tilt_max_profile_deg": 0.18634306616490368,
+     "unplanned_ground_s": 0.0
+    }
+   ]
+  }
+ }
+}

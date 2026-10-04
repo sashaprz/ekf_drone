@@ -10,6 +10,7 @@ from gz.msgs10.magnetometer_pb2 import Magnetometer
 from gz.msgs10.navsat_pb2 import NavSat
 from gz.msgs10.actuators_pb2 import Actuators
 from gz.msgs10.pose_v_pb2 import Pose_V
+from gz.msgs10.fluid_pressure_pb2 import FluidPressure
 
 from sim_degrade import SensorDegrader
 
@@ -18,6 +19,7 @@ from sim_degrade import SensorDegrader
 IMU_TOPIC = "/world/default/model/x500_0/link/base_link/sensor/imu_sensor/imu"
 MAG_TOPIC = "/world/default/model/x500_0/link/base_link/sensor/magnetometer_sensor/magnetometer"
 GPS_TOPIC = "/world/default/model/x500_0/link/base_link/sensor/navsat_sensor/navsat"
+BARO_TOPIC = "/world/default/model/x500_0/link/base_link/sensor/air_pressure_sensor/air_pressure"
 POSE_TOPIC = "/world/default/pose/info"  # ground truth, diagnostics ONLY - never fed to the EKF/controller
 MOTOR_TOPIC = "/x500_0/command/motor_speed"  # NOT /model/x500_0/... - that one exists but has zero real subscribers
 
@@ -66,6 +68,11 @@ class GazeboBridge:
         self._imu_queued = False   # becomes True on the first drain_imu()
         self._imu_time = None      # timestamp of the sample get_gyro/get_accel serve
         self._true_stamp = None
+        # barometer, 2026-10-03: (stamp, height in m relative to the first reading) - the
+        # EKF fuses it as position_z + baro_bias. EKF_USE_BARO=0 hides it (A/B).
+        self.use_baro = os.environ.get("EKF_USE_BARO", "1") == "1"
+        self._baro = None
+        self._baro_p0 = None
         self._accel_clean = (0.0, 0.0, 0.0)
         self._mag = (1.0, 0.0, 0.0)
         self._mag_scale = None  # field strength of the first reading - see _on_mag
@@ -91,6 +98,7 @@ class GazeboBridge:
         self._node.subscribe(IMU, IMU_TOPIC, self._on_imu)
         self._node.subscribe(Magnetometer, MAG_TOPIC, self._on_mag)
         self._node.subscribe(NavSat, GPS_TOPIC, self._on_gps)
+        self._node.subscribe(FluidPressure, BARO_TOPIC, self._on_baro)
         # ground truth (2026-09-30): Gazebo's world frame is ENU and the model link is FLU
         # - the same frames the EKF now uses - so this is directly comparable to
         # state['quat']/state['pos']. For logging only.
@@ -186,6 +194,17 @@ class GazeboBridge:
         self._gps_seen = True
         if self.degrade.active:
             self.degrade.gps_in(self._gps)
+
+    def _on_baro(self, msg):
+        if self._baro_p0 is None:
+            self._baro_p0 = msg.pressure
+        # standard-atmosphere pressure -> height above the boot reading
+        h = 44330.0 * (1.0 - (msg.pressure / self._baro_p0) ** (1.0 / 5.255))
+        st = msg.header.stamp
+        self._baro = (st.sec + st.nsec * 1e-9, self.degrade.baro(h))
+
+    def get_baro(self):
+        return self._baro if self.use_baro else None
 
     def _on_pose(self, msg):
         for p in msg.pose:

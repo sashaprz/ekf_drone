@@ -69,8 +69,13 @@ def score(path, mi):
     up = np.flatnonzero(z > M.TAKEOFF_Z)
     air = t >= (t[up[0]] + M.SCORE_AFTER_TAKEOFF_S) if len(up) else np.zeros(len(t), bool)
     lo, hi = GROUND_OK.get(mi.name, (1e9, -1e9))
-    unplanned = air & (z < 0.15) & ~((cols["mt"] >= lo) & (cols["mt"] <= hi))
-    ended = cols["mt"][-1] >= mi.total - 0.5
+    planned = (cols["mt"] >= lo) & (cols["mt"] <= hi)
+    if "fs" in cols:  # failsafe landing / mission-end landing (PID/failsafe.py): touchdown is planned
+        planned |= cols["fs"] >= 1
+    unplanned = air & (z < 0.15) & ~planned
+    log_path = os.path.join(RS.DATA, "logs", "live_" + os.path.basename(path)[:-4] + ".log")
+    log_txt = open(log_path).read() if os.path.exists(log_path) else ""
+    ended = cols["mt"][-1] >= mi.total - 0.5 or "MISSION_END" in log_txt
     r = {"survived": bool(ended and tilt_true[air].max() <= 45 and not unplanned.any()),
          "completed": bool(ended), "max_true_tilt_deg": float(tilt_true[air].max()) if air.any() else None,
          "unplanned_ground_s": float(unplanned.sum() * np.median(np.diff(t))), "flight_s": float(t[-1])}
@@ -86,8 +91,13 @@ def score(path, mi):
               "est_roll_mean_deg": float(att[air, 0].mean()), "est_pitch_mean_deg": float(att[air, 1].mean()),
               "est_pos_h_rms_m": float(np.sqrt(np.mean(np.hypot(ep[air, 0], ep[air, 1]) ** 2))),
               "est_vel_h_rms_ms": float(np.sqrt(np.mean(np.hypot(ev[air, 0], ev[air, 1]) ** 2)))})
+    r["est_pos_v_rms_m"] = float(np.sqrt(np.mean(ep[air, 2] ** 2)))
+    r["est_pos_v_max_m"] = float(np.abs(ep[air, 2]).max())
     log = os.path.join(RS.DATA, "logs", "live_" + os.path.basename(path)[:-4] + ".log")
     r["gps_resets_printed"] = open(log).read().count("EKF_GPS_RESET") if os.path.exists(log) else None
+    fs_lines = [ln for ln in log_txt.splitlines() if ln.startswith(("FAILSAFE", "WATCHDOG", "DISARMED"))]
+    r["failsafe_events"] = fs_lines[:4]
+    r["ended_by"] = next((ln.split(": ", 1)[1] for ln in fs_lines if ln.startswith("FAILSAFE NORMAL")), "mission")
     # real vehicle state vs the mission (EKF-independent): worst true tilt while flying
     r["true_tilt_max_profile_deg"] = float(tilt_true[(cols["mt"] >= mi.profile_start) & air].max()) if air.any() else None
     return r
@@ -142,7 +152,7 @@ def main():
     L = ["# Tier B - closed loop on the EKF", "", f"code `{res['meta']['git']}`{' (dirty)' if res['meta']['dirty'] else ''}"
          f" - tag `{a.tag or '-'}`, env `{' '.join(a.env) or '-'}`", "",
          "| mission | survived | track_h rms (EKF) | track_h rms (ORACLE) | track_h max (EKF) | est tilt rms | est tilt max | "
-         "est yaw rms | est yaw mean | est roll/pitch mean | est pos_h rms |", "|---|" + "---|" * 10]
+         "est yaw rms | est yaw mean | est roll/pitch mean | est pos_h rms | track_v rms | est pos_v rms / max |", "|---|" + "---|" * 12]
 
     def mm(s, k, nd=2):
         v = s.get(k)
@@ -153,7 +163,8 @@ def main():
         L.append(f"| {m} | {s['survived']}/{len(d['trials'])} | {mm(s, 'track_h_rms_m')} | {'-' if o is None else f'{o:.2f}'} | "
                  f"{mm(s, 'track_h_max_m')} | {mm(s, 'est_tilt_rms_deg')} | {mm(s, 'est_tilt_max_deg')} | "
                  f"{mm(s, 'est_yaw_rms_deg')} | {mm(s, 'est_yaw_mean_signed_deg', 1)} | "
-                 f"{mm(s, 'est_roll_mean_deg')} / {mm(s, 'est_pitch_mean_deg')} | {mm(s, 'est_pos_h_rms_m')} |")
+                 f"{mm(s, 'est_roll_mean_deg')} / {mm(s, 'est_pitch_mean_deg')} | {mm(s, 'est_pos_h_rms_m')} | "
+                 f"{mm(s, 'track_v_rms_m')} | {mm(s, 'est_pos_v_rms_m')} / {mm(s, 'est_pos_v_max_m')} |")
     L += ["", "Values: mean [min..max] over trials. est_* = the live EKF estimate vs Gazebo truth over the airborne window.",
           "track_h = true horizontal position vs the mission's ideal path during the profile."]
     with open(os.path.join(a.out, "TIERB.md"), "w", encoding="utf-8") as f:

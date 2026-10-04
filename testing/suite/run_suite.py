@@ -150,7 +150,7 @@ def fault_context(rec, cols):
 
 
 # ---- one replay ----------------------------------------------------------------------
-def replay(cols, remapped, cal, gps_latency=0.0):
+def replay(cols, remapped, cal, gps_latency=0.0, mag_reference=None):
     n = len(cols["t"])
     out = {"t": cols["t"], "q": np.zeros((n, 4)), "pos": np.zeros((n, 3)), "vel": np.zeros((n, 3)),
            "P_att": np.zeros((n, 3, 3)), "P_vel": np.zeros((n, 3, 3)), "P_pos": np.zeros((n, 3, 3)),
@@ -173,6 +173,8 @@ def replay(cols, remapped, cal, gps_latency=0.0):
 
     src = replay_ekf.ArrayReplay({k: v.tolist() for k, v in cols.items()}, remapped=remapped, cal=cal)
     src.gps_latency = gps_latency
+    if mag_reference is not None:  # real-hardware logs carry their own field direction (ulog_to_csv.py)
+        src.mag_reference = tuple(mag_reference)
     ekf = None
     with np.errstate(all="ignore"):
         try:
@@ -197,8 +199,9 @@ def run_task(task):
     if "keep" in info:
         truth = {k: (v[info["keep"]] if isinstance(v, np.ndarray) and len(v) == len(info["keep"]) else v)
                  for k, v in truth.items()}
-    lat = info.get("gps_latency_s", replay_ekf.load_meta(rec["path"]).get("gps_latency_s", 0.0))
-    run = replay(fcols, rec["remapped"], cal_f, lat)
+    meta = replay_ekf.load_meta(rec["path"])
+    lat = info.get("gps_latency_s", meta.get("gps_latency_s", 0.0))
+    run = replay(fcols, rec["remapped"], cal_f, lat, meta.get("mag_reference"))
     m = M.compute(run, truth, info, fault, p95)
     grades, overall = M.grade(m, fault)
     res = {"mission": rec["name"], "fault": fault.name, "fault_key": fault.key, "params": fault.params,

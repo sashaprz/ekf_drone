@@ -1,5 +1,21 @@
 # Handoff: PID cascade tuning against Gazebo/x500
 
+## 2026-10-04: hardware prep - barometer, failsafes, shadow-mode pipeline, timing benchmark
+
+Target hardware: Pixhawk + PX4, Raspberry Pi companion. Read `SHADOW_MODE.md` for the plan.
+- EKF has a baro (19th state = baro bias): live altitude error 0.48 -> 0.13 m with realistic sensors.
+- `PID/failsafe.py` (HealthMonitor + Watchdog) runs inside run_sim.py: missions now END BY LANDING
+  and disarming; GPS loss -> level landing; estimator NaN -> FALLBACK (truth in sim); loop hang ->
+  watchdog cuts motors. All verified live.
+- `testing/ulog_to_csv.py` turns a PX4 log into a suite recording (validated in SITL).
+- `testing/bench_timing.py`: run it on the Pi first.
+- Gotchas found today: PX4 launched without stdin spins its shell (2.5 GB log, 140% CPU) -> launch
+  scripts now pipe `sleep infinity` in; Python on Windows writes CRLF into .sh files (use
+  newline="
+"); numpy 2.5 (WSL) rejects float() of a 1x1 array (use .item()); PX4 SITL logs are in
+  rootfs/fs/log; SITL needs NAV_DLL_ACT=0 / COM_RC_IN_MODE=4 to arm without a GCS/RC.
+- Open: mag fused every IMU step (should be new samples only, like baro); Q_att tuning from real data.
+
 ## 2026-10-03: EKF runs on IMU sample timestamps
 
 gz_bridge queues every IMU sample with Gazebo's header stamp; run_sim steps the EKF once per sample

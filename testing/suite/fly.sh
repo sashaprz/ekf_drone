@@ -19,6 +19,7 @@ kill_all() {
     pkill -9 -f bin/px4 2>/dev/null
     pkill -9 -f "make px4_sitl" 2>/dev/null
     pkill -9 -f "gz sim" 2>/dev/null
+    pkill -9 -f "sleep infinity" 2>/dev/null
     sleep 2
 }
 
@@ -28,7 +29,8 @@ kill_all
 if pgrep -f "gz sim" >/dev/null; then echo "FLY_RESULT mission=$MISSION rc=97 (stale gz sim would not die)"; exit 97; fi
 
 cd ~/PX4-Autopilot
-nohup bash -c "HEADLESS=1 make px4_sitl gz_x500" > /tmp/px4_launch.log 2>&1 &
+# stdin = sleep infinity: PX4's pxh shell spins on EOF otherwise (floods the log, pegs a core)
+nohup bash -c "sleep infinity | HEADLESS=1 make px4_sitl gz_x500" > /tmp/px4_launch.log 2>&1 &
 ok=0
 for i in $(seq 1 90); do
     sleep 2

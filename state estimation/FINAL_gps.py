@@ -84,10 +84,12 @@ def true_yaw_dot(t): return TRUE_AMP_YAW * TRUE_FREQ_YAW * math.cos(TRUE_FREQ_YA
 
 #filter tuning (never reassigned, so these stay plain module constants even though the
 #per-instance filter state below (q, P, biases, ...) moved onto DroneEKF)
-Q = np.diag([0.01, 0.01, 0.01, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6]) #how much new uncertainty is added by the prediction step (how uncertain you are abt gyro)
+# 19 states since 2026-10-03: the 18 below + baro_bias(18). Appended last so every older index is unchanged.
+N_STATES = 19
+Q = np.diag([0.01, 0.01, 0.01, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 0.0]) #how much new uncertainty is added by the prediction step (how uncertain you are abt gyro)
 R_accel_base = np.diag([ACCEL_NOISE_STD**2] * 3) #matches ACCEL_NOISE_STD above - the old 0.1 placeholder didn't match either sensor's real noise scale
 R_mag = np.diag([MAG_NOISE_STD**2] * 3) #matches MAG_NOISE_STD above - 0.1 was ~30%+ relative noise on a unit vector, wildly unrealistic
-I = np.eye(18) #identity matrix for updating the covariance
+I = np.eye(N_STATES) #identity matrix for updating the covariance
 #how much uncertainty is added by the GPS measurement step. Grounded in typical consumer-GPS specs
 #rather than an arbitrary placeholder: ~2.5m 1-sigma horizontal, ~5m 1-sigma vertical (altitude is
 #usually ~2x worse than horizontal from a single constellation), ~0.15 m/s 1-sigma horizontal velocity,
@@ -102,6 +104,15 @@ gps_period = 0.2
 # field ~ 6deg in Gazebo's field) until in-flight rotation separates bias from attitude.
 ACCEL_BIAS_PRIOR_STD = 0.005  # m/s^2
 MAG_BIAS_PRIOR_STD = 0.02     # fraction of the unit field
+# barometer, 2026-10-03: measures height = position_z + baro_bias. Real baros drift with
+# temperature/weather, so the bias is a state, learned slowly against GPS altitude (GPS's
+# vertical sigma is ~5 m, so it only anchors the long-term average). Without a baro, GPS
+# alone held altitude - fine in Gazebo (noise-free GPS), metres of wander on a real receiver.
+BARO_STD = 0.5            # m, measurement noise assumed (Gazebo ~0.1, real MS5611-class 0.1-0.3 + prop wash)
+BARO_BIAS_Q = 2e-6        # m^2 per step (~0.5 m random walk over 10 min at 250 Hz)
+BARO_BIAS_P0 = 0.05 ** 2  # m^2 - the baro is zeroed on the ground at boot
+BARO_GATE = 6.63          # chi2 1 dof, 99%
+BARO_LOCKOUT = 25         # consecutive rejections (~0.5 s at 50 Hz) -> re-reference the bias
 GPS_LOCKOUT_RESETS = 5  # consecutive gate rejections (~1s at gps_period) before resetting pos/vel to GPS
 # mag lockout recovery, 2026-09-30 (EKF_TEST_REPORT.md F2): the mag gate had no way back -
 # once attitude was a few deg off while P claimed ~0.1deg, every reading failed the gate
@@ -338,6 +349,14 @@ class DroneEKF:
         # Real receivers ~0.1-0.2 s (PX4's EKF2_GPS_DELAY defaults to 110 ms); sensors can
         # supply it via a `gps_latency` attribute, default 0 (= the old behaviour, exactly).
         self.gps_latency = float(getattr(sensors, "gps_latency", 0.0))
+        # barometer (optional): sensors.get_baro() -> (stamp, height_m) or None
+        self._get_baro = getattr(sensors, "get_baro", None) if sensors is not None else None
+        self.baro_bias = 0.0
+        self._last_baro_stamp = None
+        self.baro_rejections = 0
+        self.H_baro = np.zeros((1, N_STATES))
+        self.H_baro[0, 11] = 1.0   # position z
+        self.H_baro[0, 18] = 1.0   # baro bias
         # clock, 2026-10-03: the IMU sample's own timestamp when the sensor provides one
         # (gz_bridge: Gazebo sim time) - dt is then the true sample spacing, not whenever the
         # sample happened to be processed. Otherwise wall time (and replay's patched clock).
@@ -399,11 +418,11 @@ class DroneEKF:
 
         #filter matrices - 18 states: attitude(0:3), gyro_bias(3:6), velocity(6:9),
         #position(9:12), accel_bias(12:15), mag_bias(15:18)
-        self.P = np.eye(18) #placeholder - overwritten below, after calibration, from calibration's own converged P
-        self.F = np.eye(18) #state transition matrix, how the state evolves from one step to the next without control input (identity for this case)
-        self.H_accel = np.zeros((3, 18)) #measurement matrix for accel - separate from H_mag now, since each correction re-linearizes independently (see apply_correction)
-        self.H_mag = np.zeros((3, 18)) #measurement matrix for mag
-        self.H_gps = np.zeros((6, 18)) #measurement matrix for GPS, how the measurements relate to the state (position rows 0:3, velocity rows 3:6)
+        self.P = np.eye(N_STATES) #placeholder - overwritten below, after calibration, from calibration's own converged P
+        self.F = np.eye(N_STATES) #state transition matrix, how the state evolves from one step to the next without control input (identity for this case)
+        self.H_accel = np.zeros((3, N_STATES)) #measurement matrix for accel - separate from H_mag now, since each correction re-linearizes independently (see apply_correction)
+        self.H_mag = np.zeros((3, N_STATES)) #measurement matrix for mag
+        self.H_gps = np.zeros((6, N_STATES)) #measurement matrix for GPS, how the measurements relate to the state (position rows 0:3, velocity rows 3:6)
 
         #pre-flight calibration - seeds q/gyro_bias/accel_bias/mag_bias/P instead of starting
         #from identity/zero/np.eye(18) (see calibration.py: accel_bias/mag_bias and
@@ -458,7 +477,8 @@ class DroneEKF:
         #onto this file's 18x18 layout (attitude, gyro_bias, velocity, position, accel_bias,
         #mag_bias) - velocity/position get a modest independent prior since calibration never
         #modeled them (the vehicle was assumed stationary throughout)
-        self.P = np.eye(18) * 0.1
+        self.P = np.eye(N_STATES) * 0.1
+        self.P[18, 18] = BARO_BIAS_P0
         self.P[0:3, 0:3] = _P_cal[0:3, 0:3]      #attitude-attitude
         self.P[0:3, 3:6] = _P_cal[0:3, 3:6]      #attitude-gyro_bias
         self.P[3:6, 0:3] = _P_cal[3:6, 0:3]
@@ -490,6 +510,7 @@ class DroneEKF:
             # where the biases are unobservable, updates leave them alone; once the vehicle
             # rotates they're learned together with the attitude they were confused with.
             self.Q[12:18, 12:18] = np.eye(6) * 1e-12
+            self.Q[18, 18] = BARO_BIAS_Q
             # accel bias stays PINNED (no correlation with attitude): unpinned with a 0.05
             # prior it diverged at hover (to 0.75 m/s^2, yaw -16deg - tilt*g vs bias rotated
             # by yaw is too weakly observable), and even a 0.005 prior WITH its calibration
@@ -507,7 +528,7 @@ class DroneEKF:
         # counters + the last gate distances. Nothing in the filter reads these.
         self.stats = {"gps_updates": 0, "gps_rejected": 0, "gps_resets": 0, "gps_no_fix": 0,
                       "accel_updates": 0, "accel_rejected": 0, "mag_updates": 0, "mag_rejected": 0,
-                      "mag_resets": 0, "stalls": 0}
+                      "mag_resets": 0, "stalls": 0, "baro_updates": 0, "baro_rejected": 0, "baro_resets": 0}
         self.mag_rejections = 0
         self.last_d2 = {"gps": None, "accel": None, "mag": None}
 
@@ -525,6 +546,7 @@ class DroneEKF:
         d_position = correction[9:12]
         d_accel_bias = correction[12:15]
         d_mag_bias = correction[15:18]
+        self.baro_bias += correction[18]
 
         self.bias_x = self.bias_x + d_bias[0]
         self.bias_y = self.bias_y + d_bias[1]
@@ -738,7 +760,7 @@ class DroneEKF:
                 if now < self._gps_att_hold_until:
                     # just after a stall: GPS may fix pos/vel only - see STALL_GPS_ATT_HOLD_S
                     K_gps[0:6, :] = 0.0
-                    K_gps[12:18, :] = 0.0
+                    K_gps[12:N_STATES, :] = 0.0
                 correction = K_gps @ residual_gps
                 self.apply_correction(correction)
                 self._shift_history(correction[9:12], correction[6:9])
@@ -748,6 +770,33 @@ class DroneEKF:
                 #this is the second p update, after we incorporate a measuremnt uncertainty goes down bc that is another measurement source
             #else: skip entirely - state and P stay exactly as the predict step left them
             self.last_gps_time = now
+
+        # barometer correction (only on a NEW sample - re-fusing a held value as if it were
+        # fresh would make the filter overconfident)
+        baro = self._get_baro() if self._get_baro is not None else None
+        if baro is not None and baro[0] != self._last_baro_stamp:
+            self._last_baro_stamp = baro[0]
+            residual_baro = baro[1] - (self.position[2] + self.baro_bias)
+            S_baro = (self.H_baro @ self.P @ self.H_baro.T).item() + BARO_STD ** 2
+            if residual_baro ** 2 / S_baro <= BARO_GATE:
+                self.baro_rejections = 0
+                self.stats["baro_updates"] += 1
+                K_baro = (self.P @ self.H_baro.T) / S_baro
+                self.apply_correction((K_baro * residual_baro).ravel())
+                IKH = I - K_baro @ self.H_baro
+                self.P = IKH @ self.P @ IKH.T + K_baro @ K_baro.T * BARO_STD ** 2
+            else:
+                self.baro_rejections += 1
+                self.stats["baro_rejected"] += 1
+                if self.baro_rejections >= BARO_LOCKOUT:
+                    # baro and state disagree persistently (step in pressure, or the state is
+                    # off): re-reference the bias to the current height and re-open it
+                    self.baro_bias = baro[1] - self.position[2]
+                    self.P[18, :] = 0.0
+                    self.P[:, 18] = 0.0
+                    self.P[18, 18] = BARO_STD ** 2
+                    self.baro_rejections = 0
+                    self.stats["baro_resets"] += 1
 
         #accel correction - predicted_accel uses q as GPS may have just updated it (via P's
         #attitude-position cross-covariance, even though H_gps itself has no attitude columns)

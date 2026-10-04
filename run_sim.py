@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "PID"))
 from FINAL_gps import DroneEKF
 from gz_bridge import GazeboBridge
 import cascade
+import failsafe
 
 # STARTING-POINT gains/limits, not tuned - real numbers for the x500 Gazebo model
 # (mass=2.0kg, motorConstant=8.54858e-06, maxRotVelocity=1000 rad/s), but the actual
@@ -254,7 +255,7 @@ def oracle_state(bridge, ekf_state):
     tq, tp = bridge.get_true_pose()
     if tq is None:
         return ekf_state
-    gps = bridge.get_gps()
+    gps = bridge.get_gps() or (0.0,) * 6
     return {"quat": np.array(tq), "pos": np.array(tp), "vel": np.array(gps[3:6]),
             "rate": np.array(bridge.get_gyro())}
 
@@ -293,6 +294,9 @@ class CalRecorder:
 
     def get_imu_time(self):
         return self._b.get_imu_time()
+
+    def get_baro(self):
+        return self._b.get_baro()
 
     def save(self, path):
         self.recording = False
@@ -336,7 +340,7 @@ def main():
         # 2026-10-03: one row per EKF step; t = the IMU sample's sim-time stamp (replay then
         # reproduces the EKF's dt exactly), tw = wall time, tt = the truth pose's own stamp.
         log.write("t,gx,gy,gz,ax,ay,az,mx,my,mz,px,py,pz,vx,vy,vz,tqw,tqx,tqy,tqz,tpx,tpy,tpz,"
-                  "mt,spx,spy,spz,spyaw,eqw,eqx,eqy,eqz,epx,epy,epz,evx,evy,evz,tw,tt\n")
+                  "mt,spx,spy,spz,spyaw,eqw,eqx,eqy,eqz,epx,epy,epz,evx,evy,evz,tw,tt,bt,bh,fs\n")
     if ORACLE:
         print("ORACLE MODE - controller is flying on Gazebo ground truth, not the EKF", flush=True)
     print(bridge.degrade.describe(), flush=True)
@@ -357,9 +361,23 @@ def main():
     stall_rng = np.random.default_rng(int(os.environ.get("SIM_SEED", "1")))
     print(f"IMU {'queued, sample timestamps' if queued else 'latest sample, arrival time'}"
           + (f"; injected loop stalls p={stall_p} {stall_s*1000:.0f}ms" if stall else ""), flush=True)
+    # 2026-10-04: safety layer (PID/failsafe.py) - the health monitor can take over from the
+    # mission (LAND / FALLBACK / DISARMED), the watchdog cuts the motors if this loop goes
+    # silent. Test hooks (sim only): SIM_NAN_AT=s corrupts the EKF covariance at s,
+    # SIM_HANG_AT=s hangs this loop at s (watchdog), SIM_GPS_LOSS_AT=s (sim_degrade.py).
+    say = lambda m: print(m, flush=True)
+    monitor = failsafe.HealthMonitor(log=say)
+    watchdog = failsafe.Watchdog(bridge.publish_motors, timeout_s=1.0, log=say)
+    nan_at = float(os.environ.get("SIM_NAN_AT", "0"))
+    hang_at = float(os.environ.get("SIM_HANG_AT", "0"))
+    nan_done = False
+    disarm_t = None
+    nan6 = (float("nan"),) * 6
     est_state = state = None
     print("running - Ctrl+C to stop", flush=True)
-    while True:
+    try:
+      while True:
+        watchdog.kick()
         if stall_p and stall_rng.random() < stall_p:
             time.sleep(stall_s)
         if queued:
@@ -368,11 +386,16 @@ def main():
             bridge.wait_for_imu()          # paces the loop to real sensor arrival - see that method's comment
             samples = [None]
         now = time.time()
-        if mission is not None:
-            if now - start_t > mission.total:
-                print(f"MISSION_END {MISSION} t={now - start_t:.2f}", flush=True)
-                break
-            setpoint = mission(now - start_t)
+        mt = now - start_t
+        if hang_at and mt > hang_at:
+            say(f"SIM_HANG_AT: main loop hangs at t={mt:.2f} (watchdog test)")
+            time.sleep(3600)
+        if nan_at and mt > nan_at and not nan_done:
+            say(f"SIM_NAN_AT: corrupting the EKF covariance at t={mt:.2f}")
+            ekf.P[0, 0] = float("nan")
+            nan_done = True
+        mission_setpoint = mission(mt) if mission is not None else {"pos": np.array([0.0, 0.0, 2.0]), "yaw": 0.0}
+        mission_done = mission is not None and mt > mission.total
         for sample in samples:
             if sample is not None:
                 bridge.use_imu_sample(sample)
@@ -382,15 +405,30 @@ def main():
                 tq, tp = tq or (1.0, 0.0, 0.0, 0.0), tp or (0.0, 0.0, 0.0)
                 t_row = bridge.get_imu_time() if queued else now
                 tt = bridge.get_true_stamp() if queued else now
-                row = (t_row, *bridge.get_gyro(), *bridge.get_accel(), *bridge.get_mag(), *bridge.get_gps(), *tq, *tp,
-                       now - start_t, *setpoint["pos"], setpoint["yaw"],
-                       *est_state["quat"], *est_state["pos"], *est_state["vel"], now, tt if tt is not None else t_row)
+                row = (t_row, *bridge.get_gyro(), *bridge.get_accel(), *bridge.get_mag(), *(bridge.get_gps() or nan6), *tq, *tp,
+                       mt, *setpoint["pos"], setpoint["yaw"],
+                       *est_state["quat"], *est_state["pos"], *est_state["vel"], now, tt if tt is not None else t_row,
+                       *(bridge.get_baro() or (float("nan"), float("nan"))), failsafe.MODE_CODE[monitor.mode])
                 log.write(",".join(f"{v:.6f}" for v in row) + "\n")
         if est_state is None:
             continue
+        backup = oracle_state(bridge, est_state) if monitor.mode == "FALLBACK" else None
+        mode = monitor.update(now, ekf, est_state, mission_done, backup_state=backup)
+        if mode == "DISARMED":
+            bridge.publish_motors(0.0, 0.0, 0.0, 0.0)
+            if disarm_t is None:
+                disarm_t = now
+                say(f"DISARMED t={mt:.2f} ({monitor.reason})")
+            if now - disarm_t > 1.0:
+                print(f"MISSION_END {MISSION} t={mt:.2f} ({monitor.reason})", flush=True)
+                break
+            continue
         state = est_state
-        if ORACLE:
+        if ORACLE or mode == "FALLBACK":
+            # FALLBACK: our EKF is unusable - in sim the backup estimator is Gazebo truth,
+            # on hardware it's PX4 taking over (leave offboard mode)
             state = oracle_state(bridge, est_state)
+        setpoint = monitor.setpoint(now, mission_setpoint, state)
 
         dt = min(now - last_t, MAX_DT)
         last_t = now
@@ -410,6 +448,11 @@ def main():
                   f"thrust={thrust:6.1f} tau=({roll_tau:6.1f},{pitch_tau:6.1f},{yaw_tau:6.1f}) "
                   f"pos=({est_state['pos'][0]:5.2f},{est_state['pos'][1]:5.2f},{est_state['pos'][2]:5.2f})"
                   + true_str(bridge), flush=True)
+    except BaseException:
+        bridge.publish_motors(0.0, 0.0, 0.0, 0.0)  # any crash in the loop: motors off, then re-raise
+        raise
+    finally:
+        watchdog.stop()
     if log:
         log.close()
 

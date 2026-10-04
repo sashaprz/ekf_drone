@@ -1,0 +1,151 @@
+{
+ "meta": {
+  "dirty": true,
+  "env": [],
+  "filter_sha1": {
+   "state estimation/FINAL_gps.py": "6534bdbba048",
+   "state estimation/calibration.py": "f891872e7efd"
+  },
+  "git": "2ea4f28",
+  "tag": "fs_normal_v2"
+ },
+ "missions": {
+  "hover": {
+   "oracle_tracking": {
+    "track_h_max_m": 0.0013640384891930285,
+    "track_h_rms_m": 0.000564496870467682,
+    "track_v_rms_m": 0.0120995659364997
+   },
+   "summary": {
+    "est_pitch_mean_deg": {
+     "max": -0.0003389102694822278,
+     "mean": -0.0003389102694822278,
+     "min": -0.0003389102694822278
+    },
+    "est_pos_h_rms_m": {
+     "max": 0.0006522491266702358,
+     "mean": 0.0006522491266702358,
+     "min": 0.0006522491266702358
+    },
+    "est_pos_v_max_m": {
+     "max": 0.27093879999999915,
+     "mean": 0.27093879999999915,
+     "min": 0.27093879999999915
+    },
+    "est_pos_v_rms_m": {
+     "max": 0.1717932355671816,
+     "mean": 0.1717932355671816,
+     "min": 0.1717932355671816
+    },
+    "est_roll_mean_deg": {
+     "max": 0.00041787130613252726,
+     "mean": 0.00041787130613252726,
+     "min": 0.00041787130613252726
+    },
+    "est_tilt_max_deg": {
+     "max": 0.01716466769761968,
+     "mean": 0.01716466769761968,
+     "min": 0.01716466769761968
+    },
+    "est_tilt_rms_deg": {
+     "max": 0.005673962561190336,
+     "mean": 0.005673962561190336,
+     "min": 0.005673962561190336
+    },
+    "est_vel_h_rms_ms": {
+     "max": 0.0007360400171243493,
+     "mean": 0.0007360400171243493,
+     "min": 0.0007360400171243493
+    },
+    "est_yaw_mean_signed_deg": {
+     "max": -0.023326743597905014,
+     "mean": -0.023326743597905014,
+     "min": -0.023326743597905014
+    },
+    "est_yaw_rms_deg": {
+     "max": 0.02436470005345753,
+     "mean": 0.02436470005345753,
+     "min": 0.02436470005345753
+    },
+    "flight_s": {
+     "max": 85.656,
+     "mean": 85.656,
+     "min": 85.656
+    },
+    "gps_resets_printed": {
+     "max": 0.0,
+     "mean": 0.0,
+     "min": 0.0
+    },
+    "max_true_tilt_deg": {
+     "max": 0.023221689492145835,
+     "mean": 0.023221689492145835,
+     "min": 0.023221689492145835
+    },
+    "n": 1,
+    "survived": 1,
+    "track_h_max_m": {
+     "max": 0.006247313422584143,
+     "mean": 0.006247313422584143,
+     "min": 0.006247313422584143
+    },
+    "track_h_rms_m": {
+     "max": 0.0030758663724409423,
+     "mean": 0.0030758663724409423,
+     "min": 0.0030758663724409423
+    },
+    "track_v_rms_m": {
+     "max": 0.17290415354871413,
+     "mean": 0.17290415354871413,
+     "min": 0.17290415354871413
+    },
+    "trial": {
+     "max": 1.0,
+     "mean": 1.0,
+     "min": 1.0
+    },
+    "true_tilt_max_profile_deg": {
+     "max": 0.023221689492145835,
+     "mean": 0.023221689492145835,
+     "min": 0.023221689492145835
+    },
+    "unplanned_ground_s": {
+     "max": 0.0,
+     "mean": 0.0,
+     "min": 0.0
+    }
+   },
+   "trials": [
+    {
+     "completed": true,
+     "ended_by": "mission complete",
+     "est_pitch_mean_deg": -0.0003389102694822278,
+     "est_pos_h_rms_m": 0.0006522491266702358,
+     "est_pos_v_max_m": 0.27093879999999915,
+     "est_pos_v_rms_m": 0.1717932355671816,
+     "est_roll_mean_deg": 0.00041787130613252726,
+     "est_tilt_max_deg": 0.01716466769761968,
+     "est_tilt_rms_deg": 0.005673962561190336,
+     "est_vel_h_rms_ms": 0.0007360400171243493,
+     "est_yaw_mean_signed_deg": -0.023326743597905014,
+     "est_yaw_rms_deg": 0.02436470005345753,
+     "failsafe_events": [
+      "FAILSAFE NORMAL -> LAND: mission complete",
+      "FAILSAFE LAND -> DISARMED: landed",
+      "DISARMED t=84.67 (landed)"
+     ],
+     "flight_s": 85.656,
+     "gps_resets_printed": 0,
+     "max_true_tilt_deg": 0.023221689492145835,
+     "survived": true,
+     "track_h_max_m": 0.006247313422584143,
+     "track_h_rms_m": 0.0030758663724409423,
+     "track_v_rms_m": 0.17290415354871413,
+     "trial": 1,
+     "true_tilt_max_profile_deg": 0.023221689492145835,
+     "unplanned_ground_s": 0.0
+    }
+   ]
+  }
+ }
+}

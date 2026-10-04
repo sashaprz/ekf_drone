@@ -199,6 +199,12 @@ class Cascade:
         self._elapsed["velocity"] += dt
         if self._elapsed["velocity"] >= self._periods["velocity"]:
             roll_sp, pitch_sp, self._thrust = self.velocity_loop(self._vel_sp, state, self._elapsed["velocity"])
+            if setpoint.get("level_xy"):
+                # 2026-10-04, failsafe landing without GPS (PID/failsafe.py): the horizontal
+                # position/velocity estimate is drifting, so don't chase it - hold level and
+                # only control the descent (vertical loops above still run). Opt-in flag,
+                # off for every normal setpoint.
+                roll_sp = pitch_sp = 0.0
             self._roll_sp, self._pitch_sp = roll_sp, pitch_sp
             self._att_sp = euler_to_quat(roll_sp, pitch_sp, setpoint["yaw"])
             self._elapsed["velocity"] = 0.0

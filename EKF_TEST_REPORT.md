@@ -435,6 +435,28 @@ judge pos/vel consistency on `gpsN`/`REAL` rows only (they read 0.7–2.2).
 >   samples (`imu_gap` faults, hardware dropouts).
 > - Offline suite unchanged (replay never used arrival time): bit-identical to `candidate_latency`.
 
+> **Hardware prep, 2026-10-03/04:**
+> - **Barometer**: 19th EKF state `baro_bias` (appended; all older indices unchanged), baro fused only on new
+>   samples, gate + re-reference on lockout; `gz_bridge.py` reads Gazebo's `air_pressure` (50 Hz) as height above
+>   the boot reading; `SIM_REALISTIC` adds 0.3 m noise + 0.3 m/√min drift; `EKF_USE_BARO=0` for A/B. Live, realistic
+>   sensors, 3 trials each: altitude-estimate error 0.48 → **0.13 m RMS** (max 0.92 → 0.28), true altitude tracking
+>   0.55 → **0.14 m** (hover/box). Offline suite bit-identical (old recordings have no baro).
+> - **Timing**: `testing/bench_timing.py` — run on the Pi. Dev laptop: 0.17 ms/step EKF+controller (4 % of a core).
+> - **Shadow mode**: `testing/ulog_to_csv.py` (PX4 .ulg → suite csv, FRD/NED → FLU/ENU, dwell, mag scale + field
+>   direction from data, `EKF2_GPS_DELAY`) and `testing/suite/px4_shadow_flight.sh` (PX4 flies itself in SITL with
+>   `SDLOG_PROFILE=3`, `SDLOG_MODE=1`). Validated end to end in SITL vs ground truth: your EKF tilt 0.25° / heading
+>   0.75° / pos 3 cm; PX4 EKF2 0.03° / 5.6° / 4 cm. Found: **mag is fused every IMU step even without a new reading**
+>   (PX4 mag ~14 Hz → ~18× over-fusion). Plan in `SHADOW_MODE.md`.
+> - **Failsafes** (`PID/failsafe.py`, wired into `run_sim.py`): HealthMonitor NORMAL → LAND / FALLBACK → DISARMED
+>   (NaN or tilt σ > 20° → FALLBACK on a backup estimator = truth in sim / PX4 on hardware; GPS lost 3 s, ≥3 GPS
+>   resets in 10 s, geofence 50 m / 15 m, loop stall 0.5 s, mission end → LAND; touchdown = low height OR
+>   "commanded down but not descending"); no-GPS landing descends level (`cascade.step` `level_xy` flag, opt-in);
+>   Watchdog thread cuts motors after 1 s of silence; any exception → motors off. Test hooks `SIM_GPS_LOSS_AT`,
+>   `SIM_NAN_AT`, `SIM_HANG_AT`. Live: normal / NaN / GPS-loss (after the level-landing fix: 2/2, tilt ≤ 0.4°,
+>   disarmed at 0.00 m) / hang (watchdog cut in 1.02 s) all behave; no false triggers on circle_fast or stops with
+>   realistic sensors + latency. The first GPS-loss version tipped over at touchdown and disarmed at 4.5 m true
+>   height — fixed by the level descent + stuck-detection.
+
 ## 5. Symptom → cause lookup (extended)
 
 | Symptom | Likely cause | Knob / change to consider |
