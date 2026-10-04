@@ -1,5 +1,190 @@
 # Handoff: PID cascade tuning against Gazebo/x500
 
+## CURRENT STATE (2026-10-04) - read this first
+
+Everything below this section is dated history (newest first). This section is the complete
+picture of what changed between 2026-09-30 and 2026-10-04 (commits `0893e46`..`f2978a6`, plus
+the doc updates after), how to run it, and what is still open.
+
+### Status in one paragraph
+The custom EKF + PID cascade flies every simulated mission (hover, box, slow/fast circles,
+hard stops, yaw steps/spin, takeoff-landing, 10-min patrol), including closed-loop with
+realistic sensor noise/biases, 150 ms GPS latency and injected loop freezes. Typical estimate
+error with clean sensors: 0.025 deg tilt / 0.08 deg heading; with realistic sensors ~0.4-0.6 deg
+tilt, ~0.9 m horizontal (GPS-noise limited), 0.13 m vertical (baro). A safety layer lands/disarms
+on its own. Tooling for real hardware (Pixhawk + PX4, Raspberry Pi) exists and was validated
+against PX4 SITL: offline shadow mode from PX4 logs, and live shadow mode over MAVLink.
+**Next real step is hardware: shadow mode on PX4 (see SHADOW_MODE.md). Your stack does not fly
+the real drone yet.**
+
+### Documents
+| File | What |
+|---|---|
+| `EKF_TEST_PLAN.md` | the original test plan for the suite |
+| `EKF_TEST_REPORT.md` | every finding, numbers and verdicts, in order; "IMPLEMENTED" blocks for each fix |
+| `SHADOW_MODE.md` | the hardware plan: PX4 params, offline shadow, live shadow on the Pi, offboard later |
+| `HANDOFF.md` | this file |
+
+### All changes, by file
+
+**`state estimation/FINAL_gps.py` (the EKF)**
+- 19 states: the old 18 + `baro_bias` (index 18, appended so older indices are unchanged).
+- Read-only instrumentation: `ekf.stats` counters (gps/mag/baro updates, rejections, resets,
+  stalls) and `ekf.last_d2` (gate distances).
+- `get_gps()` may return `None` (no fix -> skip) and fixes may be partial: NaN components are
+  skipped and the gate uses the matching chi2 dof (`CHI2_99`). MAVLink GPS has no vertical velocity.
+- **Delayed GPS fusion:** ~1.5 s history of predicted pos/vel; a fix is compared with the state
+  at `now - gps_latency`, the correction applied now and to the history. `gps_latency` comes from
+  the sensor object (bridge); 0 = old behaviour exactly.
+- **Stall handling:** when `dt` exceeds `MAX_DT`, coast through the gap (yaw rate held, roll/pitch
+  rates and accel decaying with `STALL_COAST_TAU` 0.25 s), inflate P for the unknown part
+  (about the roll/pitch rotation axis only), and for `STALL_GPS_ATT_HOLD_S` (1 s) let GPS correct
+  only pos/vel. Mostly a backstop now that the loop uses IMU timestamps.
+- **Clock:** uses the IMU sample's own timestamp when the sensor provides it (`get_imu_time`).
+- **Calibration:** live mode uses `calibration.calibrate_dwell` (average + two-vector attitude +
+  correlated covariance, priors `ACCEL_BIAS_PRIOR_STD` 0.005 m/s^2, `MAG_BIAS_PRIOR_STD` 0.02).
+- **Biases:** mag bias unpinned (learned in flight once the body rotates - the calibration turn);
+  accel bias still pinned (unpinning diverged at hover).
+- **Barometer:** fused only on new samples, `BARO_STD` 0.5 m, bias random walk `BARO_BIAS_Q`,
+  gate + re-reference after `BARO_LOCKOUT` rejections.
+- **Magnetometer fused once per reading** (`get_mag_time`), not every IMU step.
+- Mag lockout reset implemented but **disabled** (`MAG_LOCKOUT_STEPS = 0`): it let interference
+  through and worsened calibration-caused lockouts in testing.
+
+**`state estimation/calibration.py`** - new `calibrate_dwell()` (+ `triad`, `R_to_quat`); the old
+`calibrate()` is still used by the synthetic mode.
+
+**`PID/cascade.py`**
+- Attitude error is now body-frame (`q^-1 * q_sp`); the world-frame version tumbled past 90 deg yaw.
+- Opt-in `setpoint["level_xy"]`: hold level, vertical loops only (used by the no-GPS landing).
+
+**`PID/gz_bridge.py`** (Gazebo)
+- Every IMU sample queued with Gazebo's header stamp: `drain_imu()`, `use_imu_sample()`,
+  `get_imu_time()`. Callers that never drain see the old latest-sample behaviour.
+- Mag scaled by one latched field strength instead of normalised per reading (keeps a hard iron
+  learnable); `get_mag_time()`.
+- Barometer (`air_pressure` topic, 50 Hz) -> height above boot, `get_baro()`.
+- Truth pose stamp `get_true_stamp()`; `gps_latency` attribute.
+- Optional sensor degradation via `PID/sim_degrade.py`.
+
+**`PID/sim_degrade.py` (new)** - makes Gazebo's sensors look like cheap hardware, live, so the
+controller flies on it too. Off unless an env var is set (table below).
+
+**`PID/failsafe.py` (new)** - `HealthMonitor` (NORMAL -> LAND / FALLBACK -> DISARMED) and
+`Watchdog`. FALLBACK on estimator NaN or tilt sigma > 20 deg (backup estimator: Gazebo truth in
+sim, PX4 on hardware); LAND on GPS lost 3 s, >=3 GPS resets in 10 s, geofence 50 m / 15 m, loop
+stall 0.5 s, or mission end; no-GPS landing descends level; touchdown = low height OR "commanded
+down but not descending"; watchdog cuts motors after 1 s of silence.
+
+**`PID/px4_bridge.py` (new)** - same interface as `gz_bridge`, over MAVLink from PX4
+(HIGHRES_IMU 250 Hz with PX4 stamps, GPS_RAW_INT, PX4 attitude/position as reference). FRD/NED ->
+FLU/ENU, field direction measured at startup, **never sends motor commands** (shadow).
+
+**`run_sim.py`**
+- `BRIDGE=px4` selects the PX4 bridge (Gazebo import is conditional - the Pi has no Gazebo).
+- Loop steps the EKF once per queued IMU sample, then the controller once.
+- Health monitor + watchdog wired in; **missions now end by landing and disarming**; any
+  exception -> motors off. In shadow mode the failsafe logs but never ends the run.
+- `MISSION=<name>`, `CAL_TURN=1`, `MAX_VEL_XY`, `MAX_TILT_DEG`, `RUN_SECONDS` (see table).
+- `SENSOR_LOG` writes one row per EKF step with `t` = IMU stamp, plus `<log>.cal.csv` (the
+  calibration samples) and `<log>.meta.json` (gps_latency, mag_reference, env).
+
+**`testing/replay_ekf.py`** - importable core (`load_rows`, `Replay`, `ArrayReplay`,
+`run_replay`, `load_cal`, `load_meta`); calibrates on the `.cal.csv` samples; reads baro, mag
+stamps, GPS latency and field direction from the recording.
+
+**`testing/suite/` (new)** - the stress-test suite: `missions.py`, `faults.py`, `metrics.py`,
+`run_suite.py`, `compare.py`, `run_live.py`, `validate.py`, `plots.py`, `fly.sh`, `record.ps1`,
+`record.sh`, `px4_shadow_flight.sh`, `px4_live_shadow.sh`, `convert_sitl.sh`.
+
+**`testing/ulog_to_csv.py` (new)** - PX4 `.ulg` -> suite recording (offline shadow mode).
+**`testing/bench_timing.py` (new)** - can this computer run EKF + controller at 250 Hz?
+
+### How to run things
+```bash
+# offline suite (Windows python, ~6-10 min all; subsets in seconds) and comparison
+python testing/suite/run_suite.py --out testing/results/<name> [--missions ...] [--faults ...] [--no-plots]
+python testing/suite/compare.py testing/results/candidate_magonce/results.json testing/results/<name>/results.json
+python testing/suite/run_suite.py --missions none --extra <recording.csv>     # score any recording
+
+# one Gazebo flight (inside WSL; fresh restart, flies, tears down)
+bash testing/suite/fly.sh <mission> testing/data/x.csv testing/data/logs/x.log [ENV=VAL ...]
+# live trials from Windows, 3 per mission, scored
+python testing/suite/run_live.py --missions hover box --trials 3 --cal-turn --env SIM_REALISTIC=1 --tag real --out testing/results/<name>
+# record ORACLE missions for the suite
+powershell -File testing/suite/record.ps1 [mission ...]
+
+# PX4 SITL (inside WSL): PX4 flies itself with full-rate logging / live shadow over MAVLink
+bash testing/suite/px4_shadow_flight.sh testing/data/shadow/x.ulg
+python3 testing/ulog_to_csv.py testing/data/shadow/x.ulg testing/data/shadow/x.csv
+bash testing/suite/px4_live_shadow.sh testing/data/shadow/live.csv
+python testing/bench_timing.py
+```
+
+### Switches (env vars)
+| Var | Where | Effect |
+|---|---|---|
+| `MISSION=<name>` | run_sim | fly a suite mission (hover, box, circle_slow, circle_fast, stops, yaw_steps, yaw_spin, patrol_long, takeoff_land, hover_ct, box_ct) |
+| `CAL_TURN=1` | run_sim | 360 deg calibration turn after takeoff (mag bias learning) |
+| `ORACLE=1` | run_sim | controller flies on Gazebo truth (recordings) |
+| `SENSOR_LOG=x.csv` | run_sim | record everything (+ .cal.csv, .meta.json) |
+| `MAX_VEL_XY`, `MAX_TILT_DEG` | run_sim | limits for aggressive missions (ORACLE recordings) |
+| `RUN_SECONDS=N` | run_sim | stop after N s (shadow runs) |
+| `BRIDGE=px4`, `PX4_URL`, `PX4_BAUD`, `PX4_MAG_REF` | run_sim/px4_bridge | live shadow on PX4 |
+| `SIM_REALISTIC=1` | sim_degrade | cheap-hardware noise + biases on all sensors (incl. baro) |
+| `SIM_GPS_LATENCY_MS=N` | sim_degrade | delay GPS fixes |
+| `SIM_GPS_LOSS_AT=s` | sim_degrade | GPS stops (failsafe test) |
+| `SIM_LOOP_STALL=p,ms` | run_sim | freeze the loop on purpose |
+| `SIM_NAN_AT=s`, `SIM_HANG_AT=s` | run_sim | corrupt the EKF / hang the loop (failsafe/watchdog tests) |
+| `EKF_IMU_TIMESTAMPS=0` | gz_bridge | old latest-sample/arrival-time loop (A/B) |
+| `EKF_USE_BARO=0` | gz_bridge | hide the baro (A/B) |
+| `EKF_GPS_LATENCY_MS=N` | bridges | GPS latency the EKF compensates |
+| `MAG_REMAPPED`, `CAL_ROW0`, `T_END`, `EXP` | replay_ekf | old-recording / experiment knobs |
+
+### Reference results
+- Offline suite, current filter: `testing/results/candidate_magonce/` (compare new filter changes
+  against this). Older: `baseline_86193e6/` (original), `candidate_calturn`, `candidate_latency`.
+- Live: `testing/results/live_*` (TIERB.md in each), failsafe tests in `testing/results/live_failsafe/`.
+- Recordings (`testing/data/`, gitignored): `flight_<mission>.csv` (+ .cal.csv), live trials in
+  `testing/data/live/`, PX4 SITL logs in `testing/data/shadow/`.
+
+### Gotchas learned 2026-09-30..10-04 (in addition to the list further down)
+- Don't run CPU-heavy work (the offline suite) while Gazebo flights run - it caused real loop stalls.
+- PX4 launched without stdin spins its `pxh>` shell (2.5 GB log, 140 % CPU): launch scripts pipe
+  `sleep infinity` into it.
+- `pkill -f <pattern>` inside `bash -c "..."` can match and kill its own shell - put such commands
+  in a script file.
+- Python on Windows writes CRLF into `.sh` files - write with `newline="\n"`, or `sed -i 's/\r$//'`.
+- WSL numpy (2.5) rejects `float()` of a 1x1 array (Windows numpy 2.4 allows it) - use `.item()`.
+- PX4 SITL logs are in `build/px4_sitl_default/rootfs/fs/log`; SITL needs `NAV_DLL_ACT=0`,
+  `COM_RC_IN_MODE=4`, `NAV_RCL_ACT=0` to arm without a GCS/RC (set once by px4_shadow_flight.sh).
+- PX4 1.18-dev has no `EKF2_GPS_DELAY` parameter; the bridge assumes 110 ms.
+- The laptop sleeping freezes WSL and Gazebo together; a live trial that ends "not completed" with
+  `MISSION_END` at a huge t is a host freeze, not a crash.
+
+### Open issues (in priority order)
+1. **Stale GPS is accepted** (a frozen fix counts as valid). circle_fast + 5 s stale GPS reaches 25 deg
+   tilt error since the compass fix. Fix: reject a fix whose timestamp hasn't changed (bridges have it).
+2. Your EKF's tilt on PX4 SITL data is 0.25 deg vs PX4 EKF2's 0.03 deg - cause unknown, not the
+   compass. Investigate with real data.
+3. `Q_att` is ~1000x gyro noise, so the filter is underconfident (NEES << 1 almost everywhere) -
+   tune from real shadow-mode data.
+4. Accel bias stays pinned -> rely on PX4's 6-point accel calibration.
+5. Not modelled by the sim: vibration, wind, battery sag, real motor/ESC response; gains are
+   Gazebo-tuned.
+
+### Next steps
+1. Stale-GPS rejection by timestamp (software, ~1 h).
+2. Hardware (ordered: Pixhawk + PX4, Raspberry Pi; Holybro X500 V2 recommended - matches the sim
+   model): `bench_timing.py` on the Pi; PX4 calibrations; `SDLOG_PROFILE=3`, `SDLOG_MODE=1`; fly
+   on PX4 and replay the logs (offline shadow); then live shadow on the Pi
+   (`BRIDGE=px4 PX4_URL=/dev/serial0`). All in SHADOW_MODE.md.
+3. Only after shadow mode looks good: offboard control (motor mapping, gain retune from the rate
+   loop up, RC kill switch + RC fallback to PX4), props-off -> tethered -> low hover.
+
+The older "Architecture map" and "Recommended next steps" sections further down predate all of
+this - use this section instead.
+
 ## 2026-10-04 (later): compass fused once per reading; PX4 shadow bridge
 
 Mag is now fused once per reading (was every IMU step). `PID/px4_bridge.py` + `BRIDGE=px4` runs the
