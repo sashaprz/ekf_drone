@@ -48,6 +48,8 @@ the real drone yet.**
 - **Barometer:** fused only on new samples, `BARO_STD` 0.5 m, bias random walk `BARO_BIAS_Q`,
   gate + re-reference after `BARO_LOCKOUT` rejections.
 - **Magnetometer fused once per reading** (`get_mag_time`), not every IMU step.
+- **Stale GPS rejected** (`get_gps_time`, 2026-10-05): a fix whose stamp hasn't changed since the
+  last poll is skipped like "no fix" (`stats["gps_stale"]`).
 - Mag lockout reset implemented but **disabled** (`MAG_LOCKOUT_STEPS = 0`): it let interference
   through and worsened calibration-caused lockouts in testing.
 
@@ -142,8 +144,9 @@ python testing/bench_timing.py
 | `MAG_REMAPPED`, `CAL_ROW0`, `T_END`, `EXP` | replay_ekf | old-recording / experiment knobs |
 
 ### Reference results
-- Offline suite, current filter: `testing/results/candidate_magonce/` (compare new filter changes
-  against this). Older: `baseline_86193e6/` (original), `candidate_calturn`, `candidate_latency`.
+- Offline suite, current filter: `testing/results/candidate_stalegps/` (compare new filter changes
+  against this). Older: `baseline_86193e6/` (original), `candidate_calturn`, `candidate_latency`,
+  `candidate_magonce`.
 - Live: `testing/results/live_*` (TIERB.md in each), failsafe tests in `testing/results/live_failsafe/`.
 - Recordings (`testing/data/`, gitignored): `flight_<mission>.csv` (+ .cal.csv), live trials in
   `testing/data/live/`, PX4 SITL logs in `testing/data/shadow/`.
@@ -163,8 +166,10 @@ python testing/bench_timing.py
   `MISSION_END` at a huge t is a host freeze, not a crash.
 
 ### Open issues (in priority order)
-1. **Stale GPS is accepted** (a frozen fix counts as valid). circle_fast + 5 s stale GPS reaches 25 deg
-   tilt error since the compass fix. Fix: reject a fix whose timestamp hasn't changed (bridges have it).
+1. ~~Stale GPS is accepted~~ **fixed 2026-10-05** (see the dated entry below). Leftover: the
+   `takeoff_land` recording has no GPS stamps and its GPS values repeat for ~2.7 s mid-flight, so replay
+   now skips those fixes (vertical error 0.23 -> 0.42 m in that mission). Re-record it to get the
+   `gpt` column and confirm it is only a recording artifact.
 2. Your EKF's tilt on PX4 SITL data is 0.25 deg vs PX4 EKF2's 0.03 deg - cause unknown, not the
    compass. Investigate with real data.
 3. `Q_att` is ~1000x gyro noise, so the filter is underconfident (NEES << 1 almost everywhere) -
@@ -174,7 +179,7 @@ python testing/bench_timing.py
    Gazebo-tuned.
 
 ### Next steps
-1. Stale-GPS rejection by timestamp (software, ~1 h).
+1. ~~Stale-GPS rejection by timestamp~~ done 2026-10-05; re-record `takeoff_land` when convenient.
 2. Hardware (ordered: Pixhawk + PX4, Raspberry Pi; Holybro X500 V2 recommended - matches the sim
    model): `bench_timing.py` on the Pi; PX4 calibrations; `SDLOG_PROFILE=3`, `SDLOG_MODE=1`; fly
    on PX4 and replay the logs (offline shadow); then live shadow on the Pi
@@ -184,6 +189,15 @@ python testing/bench_timing.py
 
 The older "Architecture map" and "Recommended next steps" sections further down predate all of
 this - use this section instead.
+
+## 2026-10-05: stale GPS fixes rejected by timestamp
+
+`FINAL_gps.py` skips a GPS fix whose stamp is unchanged since the last poll (`_gps_is_new`, same
+pattern as the compass). Both bridges expose `get_gps_time()`; recordings get a `gpt` column; replay
+of older recordings treats a fix as new when its values change. Suite
+(`testing/results/candidate_stalegps` vs `candidate_magonce`): circle_fast + stale GPS 25 deg -> 0.6 deg
+tilt max, GPS lockout resets during stale windows 67 -> 0, stale rows now behave like dropout rows.
+Every mission except `takeoff_land` is bit-identical on non-stale faults (see open issue 1).
 
 ## 2026-10-04 (later): compass fused once per reading; PX4 shadow bridge
 

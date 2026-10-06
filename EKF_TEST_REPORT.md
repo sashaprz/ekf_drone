@@ -470,6 +470,19 @@ judge pos/vel consistency on `gpsN`/`REAL` rows only (they read 0.7–2.2).
 >   never sends motors). SITL live test (`testing/suite/px4_live_shadow.sh`): 18 248 steps/75 s, your EKF vs PX4
 >   EKF2 tilt 0.25° RMS, heading +0.33°, position 2 cm / 9 cm. PX4 1.18-dev has no `EKF2_GPS_DELAY` → 110 ms fallback.
 
+> **2026-10-05: stale GPS rejected by timestamp (F6).**
+> - A fix whose stamp is unchanged since the last poll is skipped like "no fix" (`get_gps_time` from the bridge,
+>   `gpt` log column, value-change inference for old recordings; `stats["gps_stale"]`). Suite
+>   (`testing/results/candidate_stalegps/` vs `candidate_magonce`): circle_fast stale 5/15/30 s tilt max
+>   25.2/23.1/23.1° → 0.57/0.43/0.55°; lockout resets in stale windows 67 → 0, gate rejections 337 → 0; stale rows
+>   now match the dropout rows on tilt. Missions that barely move (hover, yaw, takeoff_land) now drift during a
+>   stale window like a dropout (e.g. hover 30 s: 0.01 → 3.0 m) — before, the frozen fix happened to be right.
+> - 6 grade changes WARN → FAIL (box, circle_slow, box_ct stale rows), all from `nees_att` dropping far below 1:
+>   the stale-induced errors had been masking the known underconfident `Q_att`.
+> - Non-stale runs: 302 bit-identical, 29 changed — all `takeoff_land`. That recording has no GPS stamps and its
+>   GPS values repeat for ~2.7 s around t = 29–32 s, so the value-change inference skips those fixes (22 fewer
+>   updates; `none`: vertical RMS 0.23 → 0.42 m, horizontal max 0.001 → 0.009 m). Needs a re-record with `gpt`.
+
 ## 5. Symptom → cause lookup (extended)
 
 | Symptom | Likely cause | Knob / change to consider |

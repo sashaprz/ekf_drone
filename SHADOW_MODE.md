@@ -60,9 +60,9 @@ Rates seen: IMU 250 Hz, GPS 31 Hz, baro 20 Hz, mag 14 Hz.
 - ~~Mag fused every IMU step~~ **fixed 2026-10-04**: each reading is fused once (stamps from the
   bridge / log `mgt` column). On the SITL log it changed tilt only 0.25° → 0.24° and heading
   0.75° → 0.66°, so it is NOT what separates your tilt from EKF2's 0.03° - still open.
-- **Stale GPS**: a frozen fix is still accepted (suite `gps_stale`); with the compass now weighted
-  correctly, circle_fast + 5 s stale GPS reaches 25° tilt error. Fix next: reject a fix whose
-  timestamp hasn't changed (the bridge has GPS_RAW_INT.time_usec) - same idea as the mag fix.
+- ~~Stale GPS accepted~~ **fixed 2026-10-05**: a fix whose timestamp hasn't changed
+  (`GPS_RAW_INT.time_usec` live, `gpt` column in logs) is skipped like "no fix". Suite: circle_fast +
+  5 s stale GPS 25° → 0.6° tilt max.
 - **Accel bias stays pinned** (unpinning diverged in sim) — rely on PX4's 6-point accel cal.
 - **`Q_att` is ~1000× gyro noise** — tune from real data (step 5 above), not from the sim.
 - The magnetic-field direction must come from the data (converter) or the WMM for your
