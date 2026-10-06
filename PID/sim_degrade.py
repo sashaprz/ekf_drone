@@ -85,7 +85,7 @@ class SensorDegrader:
         self._last_baro_t = now
         return h + self._baro_walk + r.normal(0, 0.3)
 
-    def gps_in(self, fix):
+    def gps_in(self, fix, stamp=None):
         # called on every fix the bridge receives; returns nothing - get_gps reads gps_out
         now = time.time()
         self._first_gps_t = self._first_gps_t or now
@@ -98,16 +98,23 @@ class SensorDegrader:
             pos = np.asarray(fix[0:3]) + r.normal(0, 1, 3) * np.array([1.5, 1.5, 3.0]) + self._walk
             vel = np.asarray(fix[3:6]) + r.normal(0, 0.1, 3)
             fix = (*pos, *vel)
-        self._gps_queue.append((now, tuple(fix)))
+        self._gps_queue.append((now, tuple(fix), stamp))
+
+    def _gps_pick(self):
+        # newest queued (arrival time, fix, stamp) that is at least `latency` old, or None
+        cutoff = time.time() - self.latency
+        for entry in reversed(self._gps_queue):
+            if entry[0] <= cutoff:
+                return entry
+        return None
 
     def gps_out(self, default):
-        # newest fix that is at least `latency` old
         if self.gps_loss_at and self._first_gps_t and time.time() - self._first_gps_t > self.gps_loss_at:
             return None
-        if not self._gps_queue:
-            return default
-        cutoff = time.time() - self.latency
-        for t, fix in reversed(self._gps_queue):
-            if t <= cutoff:
-                return fix
-        return default
+        entry = self._gps_pick()
+        return entry[1] if entry else default
+
+    def gps_out_stamp(self):
+        # stamp of the fix gps_out returns (None while it returns the default)
+        entry = self._gps_pick()
+        return entry[2] if entry else None

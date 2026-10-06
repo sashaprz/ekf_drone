@@ -80,6 +80,7 @@ class GazeboBridge:
         # world-frame field direction for FINAL_gps.py's mag model - see MAG_REFERENCE_ENU
         self.mag_reference = MAG_REFERENCE_ENU
         self._gps = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        self._gps_time = None
         # optional live sensor degradation (SIM_REALISTIC / SIM_GPS_LATENCY_MS env vars) -
         # a no-op by default, see sim_degrade.py
         self.degrade = SensorDegrader()
@@ -195,8 +196,10 @@ class GazeboBridge:
         # along the other - a good fit for "any nonzero pos_xy gain tumbles it".
         self._gps = (east, north, up, msg.velocity_east, msg.velocity_north, msg.velocity_up)
         self._gps_seen = True
+        st = msg.header.stamp
+        self._gps_time = st.sec + st.nsec * 1e-9  # the EKF rejects a repeated fix (get_gps_time)
         if self.degrade.active:
-            self.degrade.gps_in(self._gps)
+            self.degrade.gps_in(self._gps, self._gps_time)
 
     def _on_baro(self, msg):
         if self._baro_p0 is None:
@@ -283,6 +286,11 @@ class GazeboBridge:
         if self.degrade.active and self._gps_seen:
             return self.degrade.gps_out((0.0, 0.0, 0.0, 0.0, 0.0, 0.0))
         return self._gps
+
+    def get_gps_time(self):
+        if self.degrade.active and self._gps_seen:
+            return self.degrade.gps_out_stamp()
+        return self._gps_time
 
     def publish_motors(self, m1, m2, m3, m4):
         # velocity field is rad/s directly (x500's MulticopterMotorModel plugin,

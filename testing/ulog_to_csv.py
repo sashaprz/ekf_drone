@@ -130,7 +130,8 @@ def main():
     north = np.radians(lat - lat0) * EARTH_RADIUS
     east = np.radians(lon - lon0) * EARTH_RADIUS * math.cos(math.radians(lat0))
     g_enu = np.stack([east, north, alt - alt0, gps["vel_e_m_s"][good], gps["vel_n_m_s"][good], -gps["vel_d_m_s"][good]], axis=1)
-    g_rows, _ = hold(tg, g_enu, t)
+    g_rows, gi = hold(tg, g_enu, t)
+    gpt = tg[gi]  # each row's GPS-fix stamp - the EKF rejects a repeated (stale) fix
 
     # baro: height relative to the dwell, with its own sample stamp
     if baro is not None:
@@ -174,13 +175,13 @@ def main():
     os.makedirs(os.path.dirname(os.path.abspath(a.csv)), exist_ok=True)
     cols = ["t", "gx", "gy", "gz", "ax", "ay", "az", "mx", "my", "mz", "px", "py", "pz", "vx", "vy", "vz",
             "tqw", "tqx", "tqy", "tqz", "tpx", "tpy", "tpz", "mt", "spx", "spy", "spz", "spyaw",
-            "eqw", "eqx", "eqy", "eqz", "epx", "epy", "epz", "evx", "evy", "evz", "tw", "tt", "bt", "bh", "mgt"]
+            "eqw", "eqx", "eqy", "eqz", "epx", "epy", "epz", "evx", "evy", "evz", "tw", "tt", "bt", "bh", "mgt", "gpt"]
     f0 = flight.start
     n = len(t) - f0
     z = np.zeros(n)
     evel = evel if evel is not None else np.zeros((len(t), 3))
     data = np.column_stack([t[f0:], gyro[f0:], accel[f0:], m[f0:], g_rows[f0:], tq[f0:], tpos[f0:],
-                            t[f0:] - t[f0], z, z, z, z, eq[f0:], epos[f0:], evel[f0:], t[f0:], tt[f0:], bt[f0:], bh[f0:], mgt[f0:]])
+                            t[f0:] - t[f0], z, z, z, z, eq[f0:], epos[f0:], evel[f0:], t[f0:], tt[f0:], bt[f0:], bh[f0:], mgt[f0:], gpt[f0:]])
     np.savetxt(a.csv, data, delimiter=",", header=",".join(cols), comments="", fmt="%.6f")
     with open(a.csv + ".cal.csv", "w") as fcal:
         fcal.write("gx,gy,gz,mx,my,mz,ax,ay,az\n")

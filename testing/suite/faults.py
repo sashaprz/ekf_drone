@@ -32,6 +32,7 @@ G = 9.80665
 IMU = ("gx", "gy", "gz", "ax", "ay", "az", "mx", "my", "mz")
 GPS_POS = ("px", "py", "pz")
 GPS_VEL = ("vx", "vy", "vz")
+GPS_STAMP = ("gpt",)  # each row's GPS-fix stamp (recordings since 2026-10-05) - moves with the fix
 
 
 def _rng(name, seed, salt=""):
@@ -102,8 +103,9 @@ class Fault:
         m = (c["t"] >= ws) & (c["t"] < we)
         if m.any():
             k0 = max(np.argmax(m) - 1, 0)
-            for k in GPS_POS + GPS_VEL:
-                c[k][m] = c[k][k0]
+            for k in GPS_POS + GPS_VEL + GPS_STAMP:
+                if k in c:
+                    c[k][m] = c[k][k0]
         info["window"] = (ws, we)
         return c, info
 
@@ -149,8 +151,9 @@ class Fault:
         # fuses each fix as if it described "now" - this measures what that costs.
         t = c["t"]
         idx = np.clip(np.searchsorted(t, t - self.params["latency_ms"] / 1000.0, side="right") - 1, 0, len(t) - 1)
-        for k in GPS_POS + GPS_VEL:
-            c[k] = c[k][idx]
+        for k in GPS_POS + GPS_VEL + GPS_STAMP:
+            if k in c:
+                c[k] = c[k][idx]
         # what the EKF is told (delayed fusion) - the true latency unless overridden, e.g.
         # ekf_latency_ms=0 to see the uncompensated filter
         info["gps_latency_s"] = self.params.get("ekf_latency_ms", self.params["latency_ms"]) / 1000.0

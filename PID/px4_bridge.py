@@ -104,6 +104,7 @@ class Px4Bridge:
         self._baro = None
         self._p0 = None
         self._gps = None
+        self._gps_time = None
         self._home = None
         self._ref_q = self._ref_pos = self._ref_stamp = None
         self._motor_warned = False
@@ -206,6 +207,7 @@ class Px4Bridge:
             ve = vn = float("nan")
         # GPS_RAW_INT has no vertical velocity -> NaN (FINAL_gps fuses partial fixes)
         self._gps = (east, north, alt - alt0, ve, vn, float("nan"))
+        self._gps_time = msg.time_usec * 1e-6  # the EKF rejects a repeated fix (get_gps_time)
 
     def _on_att(self, msg):
         q_ned_frd = (msg.q1, msg.q2, msg.q3, msg.q4)
@@ -254,6 +256,9 @@ class Px4Bridge:
 
     def get_gps(self):
         return self._gps
+
+    def get_gps_time(self):
+        return self._gps_time
 
     def get_true_pose(self):
         # PX4's own estimate - the reference in shadow mode (there is no ground truth on hardware)

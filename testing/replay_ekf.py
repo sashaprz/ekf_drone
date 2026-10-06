@@ -141,6 +141,24 @@ class Replay:
             return None
         return (r["px"], r["py"], r["pz"], r["vx"], r["vy"], r["vz"])
 
+    def get_gps_time(self):
+        # 'gpt' column (recordings since 2026-10-05); older recordings: a fix is new when its
+        # value changes (same idea as get_mag_time)
+        r = self._row()
+        if "gpt" in r:
+            return r["gpt"] if r["gpt"] == r["gpt"] else None
+        g = _gps_key((r["px"], r["py"], r["pz"], r["vx"], r["vy"], r["vz"]))
+        if g != getattr(self, "_prev_gps", None):
+            self._prev_gps = g
+            self._gps_id = getattr(self, "_gps_id", 0) + 1
+        return self._gps_id
+
+
+def _gps_key(fix):
+    # NaN components (partial fixes) never compare equal - map them to None so a repeated
+    # partial fix is still recognised as the same fix
+    return tuple(v if v == v else None for v in fix)
+
 
 class ArrayReplay(Replay):
     """Same sensor interface as Replay, backed by columns (name -> python list) instead of
@@ -165,6 +183,16 @@ class ArrayReplay(Replay):
                     k, prev = k + 1, m
                 ids.append(k)
             self._mag_t = ids
+        if "gpt" in c:
+            self._gps_t = [v if v == v else None for v in c["gpt"]]
+        else:  # infer: a new fix wherever the value changes
+            ids, prev, k = [], None, 0
+            for p in self._p:
+                p = _gps_key(p)
+                if p != prev:
+                    k, prev = k + 1, p
+                ids.append(k)
+            self._gps_t = ids
 
     def _k(self):
         return 0 if self.calibrating else self.i
@@ -195,6 +223,9 @@ class ArrayReplay(Replay):
         if self._ok is not None and self._ok[k] == 0.0:
             return None
         return self._p[k]
+
+    def get_gps_time(self):
+        return None if self.calibrating else self._gps_t[self.i]
 
 
 def apply_exp(ekf, exp):

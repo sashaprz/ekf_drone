@@ -341,6 +341,8 @@ class DroneEKF:
         self._get_mag_time = getattr(sensors, "get_mag_time", None) if sensors is not None else None
         self._last_mag_stamp = None
         self._get_gps = get_gps if sensors is None else sensors.get_gps
+        self._get_gps_time = getattr(sensors, "get_gps_time", None) if sensors is not None else None
+        self._last_gps_stamp = None
         # world-frame mag field direction, 2026-09-30 - was hardcoded (1,0,0) (horizontal,
         # pointing along world x) in both the step() mag model and calibration. True for
         # this file's synthetic sensors, but not for Gazebo, whose field dips ~63deg down
@@ -529,7 +531,7 @@ class DroneEKF:
         self.gps_rejections = 0
         # read-only instrumentation for testing/suite (EKF_TEST_PLAN.md s1 exception 1):
         # counters + the last gate distances. Nothing in the filter reads these.
-        self.stats = {"gps_updates": 0, "gps_rejected": 0, "gps_resets": 0, "gps_no_fix": 0,
+        self.stats = {"gps_updates": 0, "gps_rejected": 0, "gps_resets": 0, "gps_no_fix": 0, "gps_stale": 0,
                       "accel_updates": 0, "accel_rejected": 0, "mag_updates": 0, "mag_rejected": 0,
                       "mag_resets": 0, "stalls": 0, "baro_updates": 0, "baro_rejected": 0, "baro_resets": 0}
         self.mag_rejections = 0
@@ -574,6 +576,16 @@ class DroneEKF:
         if stamp == self._last_mag_stamp:
             return False
         self._last_mag_stamp = stamp
+        return True
+
+    def _gps_is_new(self):
+        # a receiver that hangs keeps reporting its last fix as valid - same stamp = same fix
+        stamp = self._get_gps_time() if self._get_gps_time is not None else None
+        if stamp is None:
+            return True  # no timestamps from this sensor: every polled fix counts (pre-2026-10-05 behaviour)
+        if stamp == self._last_gps_stamp:
+            return False
+        self._last_gps_stamp = stamp
         return True
 
     def _state_at(self, t):
@@ -720,6 +732,11 @@ class DroneEKF:
         gps_fix = self._get_gps() if gps_due else None
         if gps_due and gps_fix is None:
             self.stats["gps_no_fix"] += 1
+        elif gps_fix is not None and not self._gps_is_new():
+            # stale fix (stamp unchanged since the last poll): treat like "no fix" - skip the
+            # update and poll again next tick
+            gps_fix = None
+            self.stats["gps_stale"] += 1
         if gps_fix is not None:
             #get gps data
             gps_x, gps_y, gps_z, gps_vx, gps_vy, gps_vz = gps_fix  # world frame (ENU for gz_bridge)

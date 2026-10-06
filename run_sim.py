@@ -306,6 +306,9 @@ class CalRecorder:
     def get_mag_time(self):
         return self._b.get_mag_time()
 
+    def get_gps_time(self):
+        return self._b.get_gps_time()
+
     def save(self, path):
         self.recording = False
         with open(path, "w") as f:
@@ -348,7 +351,7 @@ def main():
         # 2026-10-03: one row per EKF step; t = the IMU sample's sim-time stamp (replay then
         # reproduces the EKF's dt exactly), tw = wall time, tt = the truth pose's own stamp.
         log.write("t,gx,gy,gz,ax,ay,az,mx,my,mz,px,py,pz,vx,vy,vz,tqw,tqx,tqy,tqz,tpx,tpy,tpz,"
-                  "mt,spx,spy,spz,spyaw,eqw,eqx,eqy,eqz,epx,epy,epz,evx,evy,evz,tw,tt,bt,bh,fs,mgt\n")
+                  "mt,spx,spy,spz,spyaw,eqw,eqx,eqy,eqz,epx,epy,epz,evx,evy,evz,tw,tt,bt,bh,fs,mgt,gpt\n")
     if ORACLE:
         print("ORACLE MODE - controller is flying on Gazebo ground truth, not the EKF", flush=True)
     print(bridge.degrade.describe(), flush=True)
@@ -424,7 +427,8 @@ def main():
                        mt, *setpoint["pos"], setpoint["yaw"],
                        *est_state["quat"], *est_state["pos"], *est_state["vel"], now, tt if tt is not None else t_row,
                        *(bridge.get_baro() or (float("nan"), float("nan"))), failsafe.MODE_CODE[monitor.mode],
-                       bridge.get_mag_time() if bridge.get_mag_time() is not None else float("nan"))
+                       bridge.get_mag_time() if bridge.get_mag_time() is not None else float("nan"),
+                       bridge.get_gps_time() if bridge.get_gps_time() is not None else float("nan"))
                 log.write(",".join(f"{v:.6f}" for v in row) + "\n")
         if est_state is None:
             continue
