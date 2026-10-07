@@ -210,7 +210,15 @@ class Cascade:
             self._elapsed["velocity"] = 0.0
 
         self._elapsed["attitude"] += dt
-        if self._elapsed["attitude"] >= self._periods["attitude"]:
+        if setpoint.get("rate") is not None:
+            # opt-in acro override (flips, testing/suite/missions.py): body rates (rad/s) and
+            # collective thrust come straight from the setpoint. The outer loops above keep
+            # running so their state is current when the override ends; the attitude loop
+            # is skipped - it would fight the rotation.
+            self._rate_sp = np.asarray(setpoint["rate"], dtype=float)
+            self._thrust = setpoint.get("thrust", self._thrust)
+            self._elapsed["attitude"] = 0.0
+        elif self._elapsed["attitude"] >= self._periods["attitude"]:
             self._rate_sp = self.attitude_loop(self._att_sp, state, self._elapsed["attitude"])
             self._elapsed["attitude"] = 0.0
 

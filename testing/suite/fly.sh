@@ -4,6 +4,7 @@
 #   wsl -d Ubuntu-24.04 -- bash /mnt/c/Users/Sasha/repos/python_drone/testing/suite/fly.sh \
 #       <mission> <csv, repo-relative> <log, repo-relative> [ENV=VAL ...]
 # e.g. ... fly.sh hover testing/data/flight_hover.csv testing/data/logs/rec_hover.log ORACLE=1
+# Add GUI=1 to see the Gazebo window (demo: fly.sh demo ... MAX_VEL_XY=3.5 MAX_TILT_DEG=25 GUI=1).
 #
 # Follows HANDOFF.md's standard procedure: kill everything (fresh spawn), launch PX4+gz
 # headless, wait for the 4 real motor subscribers, kill ONLY PX4 so the motor topic is
@@ -30,7 +31,13 @@ if pgrep -f "gz sim" >/dev/null; then echo "FLY_RESULT mission=$MISSION rc=97 (s
 
 cd ~/PX4-Autopilot
 # stdin = sleep infinity: PX4's pxh shell spins on EOF otherwise (floods the log, pegs a core)
-nohup bash -c "sleep infinity | HEADLESS=1 make px4_sitl gz_x500" > /tmp/px4_launch.log 2>&1 &
+# GUI=1 among the ENV=VAL args: show the Gazebo window with the camera following the
+# vehicle (demo videos); default is headless
+SIMENV="HEADLESS=1"
+for a in "$@"; do
+    if [ "$a" = "GUI=1" ]; then SIMENV="PX4_GZ_FOLLOW=1 PX4_GZ_FOLLOW_OFFSET_X=-5 PX4_GZ_FOLLOW_OFFSET_Y=-5 PX4_GZ_FOLLOW_OFFSET_Z=3"; fi
+done
+nohup bash -c "sleep infinity | $SIMENV make px4_sitl gz_x500" > /tmp/px4_launch.log 2>&1 &
 ok=0
 for i in $(seq 1 90); do
     sleep 2
