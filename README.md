@@ -1,12 +1,14 @@
 # python_drone
 
-A drone flight stack written from scratch in Python: my own state estimator (an EKF) and PID controller.
+A from-scratch EKF for a drone, built as the foundation for battery state-of-charge estimation and smarter return-to-home.
 
 ## Overview
 
 ### Goal
 
-The end goal is battery state-of-charge (SOC) estimation, so the drone can make better return-to-home decisions: knowing not just how far home is, but how confident it can be that the battery will get it there.
+Drones are power-hungry, so the end goal is battery state-of-charge (SOC) estimation that lets the drone make better return-to-home decisions. It should know not just how far it is from home, but also how confident it can be that it will make it home.
+
+*Caveat: SOC estimation itself isn't built yet. This repo is the foundation for it.*
 
 I built an EKF from scratch to learn state estimation properly, and I'm applying it to SOC-aware return-home. So far that has meant building the two core pieces an autopilot like PX4 normally gives you as a black box:
 
@@ -19,7 +21,7 @@ ______
 
 The estimator is a quaternion multiplicative EKF (MEKF) that fuses gyro, accelerometer, magnetometer, GPS and barometer readings. It also estimates each sensor's bias (gyro, accel, mag, baro) as part of the state, and statistical gates reject any measurement too far from what the filter predicts.
 
-The sections below are the tests that led to this design. Each one compares a simpler filter against the next improvement on the same simulated data.
+The sections below are the tests that led to this design. Each one compares a simpler filter against the next improvement on the same simulated data (synthetic sensor streams at first, then Gazebo physics).
 
 **Gyro bias**: a real gyro doesn't read exactly zero at rest — manufacturing imperfections, temperature drift, and vibration give it a small persistent offset that isn't true rotation. Left uncorrected it integrates into steadily growing angle error, which is why the better filters below estimate and subtract it.
 
