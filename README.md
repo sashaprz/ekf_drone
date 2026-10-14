@@ -1,5 +1,39 @@
 # python_drone
 
+A drone flight stack written from scratch in Python: my own state estimator (an EKF) and PID controller, flown in a physics simulator before it goes anywhere near real hardware.
+
+## Overview
+
+### Goal
+
+Replace the two core pieces an autopilot like PX4 normally gives you as a black box:
+
+1. **State estimation**: turn raw gyro, accelerometer, magnetometer, GPS and barometer readings into an estimate of the drone's orientation, velocity and position.
+2. **Control**: fly the drone using that estimate.
+
+The estimator is the main focus. The controller exists to prove the estimate is good enough to fly on.
+
+### Why
+
+- **To understand it, not just use it.** PX4's EKF2 works, but it hides the parts that matter most: how the filter decides what to trust, what it does when a sensor is lying, and why it fails when it does. Writing one is the only way to really learn those.
+- **To know its failure modes.** If I wrote the filter, I know which sensor it leans on for each state, which bad inputs it rejects, and how it recovers. Those questions get answered with tests, not guesses.
+- **To validate safely.** A physics simulator lets me crash as often as I need to, compare the estimate against perfect ground truth, and replay the same flight data through each new version of the filter.
+
+### Approach
+
+1. **Pick the filter by experiment.** I built progressively better filters and scored each against the same simulated trajectory and sensor stream using RMS error: a complementary filter, an Euler-angle EKF, an EKF that also estimates gyro bias, then a quaternion EKF. The results are in the sections below.
+2. **The filter I chose: a quaternion multiplicative EKF (MEKF).** Attitude is stored as a quaternion (no gimbal lock), and the Kalman math runs on a small 3D error state that gets folded back into the quaternion. Alongside attitude, velocity and position, it estimates **gyro, accelerometer and magnetometer biases** (plus a barometer bias), because every real sensor has a slowly drifting offset that would otherwise build up into error. That makes 19 states in all (`state estimation/FINAL_gps.py`).
+3. **Distrust bad measurements.** Every correction (accel, mag, GPS, baro) goes through a chi-squared gate on its residual. A reading that disagrees with the prediction more than the noise model allows is thrown out instead of being allowed to corrupt the state. If readings keep getting rejected, the filter recovers instead of locking itself out forever.
+4. **Fly it in Gazebo instead of PX4.** The EKF and a cascaded PID controller (position → velocity → attitude → rate → motors) fly PX4's x500 quadrotor model in Gazebo Harmonic. PX4's own estimator and controller are bypassed entirely: a Python bridge (`PID/gz_bridge.py`) reads Gazebo's simulated sensors and sends motor speeds directly. Gazebo supplies only the physics and the sensors; every estimation and control decision is mine.
+
+### Where it stands
+
+- The EKF + PID stack flies every simulated mission (hover, box, circles, hard stops, yaw spins, takeoff/landing, a 10-minute patrol), including with realistic sensor noise and biases and 150 ms of GPS latency.
+- Typical estimate error with clean sensors is ~0.03° tilt and ~0.08° heading. With realistic sensors it is ~0.5° tilt, ~0.9 m horizontal and ~0.13 m vertical.
+- **Next: real hardware.** The plan is to run the EKF in "shadow mode" on a Raspberry Pi next to a real PX4 flight controller, comparing estimates without giving it control, before letting it fly (see `SHADOW_MODE.md`). `PID/px4_bridge.py` already runs the whole stack on PX4's MAVLink stream in simulation.
+
+---
+
 Attitude and position estimation for a drone from gyro + accelerometer + magnetometer + GPS — a complementary filter vs. a progression of EKF designs, from Euler-angle to quaternion attitude, adaptive noise + gating, and GPS-fused position/velocity tracking.
 
 **Gyro bias**: a real gyro doesn't read exactly zero at rest — manufacturing imperfections, temperature drift, and vibration give it a small persistent offset that isn't true rotation. Left uncorrected it integrates into steadily growing angle error, which is why the better filters below estimate and subtract it.
