@@ -6,7 +6,9 @@ A drone flight stack written from scratch in Python: my own state estimator (an 
 
 ### Goal
 
-Replace the two core pieces an autopilot like PX4 normally gives you as a black box:
+The end goal is battery state-of-charge (SOC) estimation, so the drone can make better return-to-home decisions: knowing not just how far home is, but how confident it can be that the battery will get it there.
+
+I built an EKF from scratch to learn state estimation properly, and I'm applying it to SOC-aware return-home. So far that has meant building the two core pieces an autopilot like PX4 normally gives you as a black box:
 
 1. **State estimation**: turn raw gyro, accelerometer, magnetometer, GPS and barometer readings into an estimate of the drone's orientation, velocity and position.
 2. **Control**: fly the drone using that estimate.
@@ -15,7 +17,9 @@ The estimator is the main focus. The controller exists to prove the estimate is 
 
 ______
 
-Attitude and position estimation for a drone from gyro + accelerometer + magnetometer + GPS — a complementary filter vs. a progression of EKF designs, from Euler-angle to quaternion attitude, adaptive noise + gating, and GPS-fused position/velocity tracking.
+The estimator is a quaternion multiplicative EKF (MEKF) that fuses gyro, accelerometer, magnetometer, GPS and barometer readings. It also estimates each sensor's bias (gyro, accel, mag, baro) as part of the state, and statistical gates reject any measurement too far from what the filter predicts.
+
+The sections below are the tests that led to this design. Each one compares a simpler filter against the next improvement on the same simulated data.
 
 **Gyro bias**: a real gyro doesn't read exactly zero at rest — manufacturing imperfections, temperature drift, and vibration give it a small persistent offset that isn't true rotation. Left uncorrected it integrates into steadily growing angle error, which is why the better filters below estimate and subtract it.
 
@@ -67,6 +71,14 @@ Switched the attitude state from Euler angles to a quaternion, which turns this 
 ## Motion robustness: adaptive R + gating (`ekf.py`, `test_gating.py`)
 
 `ekf.py` now inflates accel's measurement noise (`R_accel`) when the raw accel magnitude deviates from 1g (real acceleration, not just tilt), and gates out (fully rejects) any accel reading too implausible to trust at all — a chi-squared test on the residual, 3 DOF.
+
+**How the chi-squared gate works.** Before each correction the filter predicts what the sensor should read; the *residual* is the actual reading minus that prediction. A fixed limit ("reject if off by more than X") doesn't work, because what counts as a big residual changes: right after startup the filter is uncertain and large residuals are normal, while after a long clean flight the same residual is suspicious, and each axis has its own noise level. So the residual is first scaled by how big it's *expected* to be, `S = H P Hᵀ + R` (the filter's own uncertainty mapped into sensor space, plus sensor noise):
+
+```
+d² = residualᵀ · S⁻¹ · residual
+```
+
+This is the squared Mahalanobis distance, the residual measured in standard deviations (in 1D it's just (residual / σ)²). If the filter's model is right, each scaled axis is a standard Gaussian, and a sum of k squared standard Gaussians follows a **chi-squared distribution with k degrees of freedom** (k = how many numbers are compared: 3 for accel x/y/z). That distribution is known, so the threshold can be looked up: for 3 DOF, `d²` stays under 11.34 99% of the time. Rejecting above that means a good reading is wrongly thrown out only 1% of the time, a chosen false-rejection rate instead of a guessed limit. The gate also adapts on its own: as `P` shrinks it tightens, and as `P` grows it loosens.
 
 `test_gating.py` injects a physically-absurd accel spike (~8.7g) for 10 iterations and compares roll with gating on vs. off:
 
