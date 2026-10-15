@@ -1,21 +1,17 @@
 # python_drone
 
-A from-scratch EKF for a drone, built as the foundation for battery state-of-charge estimation and smarter return-to-home.
+A from-scratch EKF and PID controller for a drone, built as the foundation for battery state-of-charge estimation and smarter return-to-home.
 
 ## Overview
 
-### Goal
-
-Drones are power-hungry, so the end goal is battery state-of-charge (SOC) estimation that lets the drone make better return-to-home decisions. It should know not just how far it is from home, but also how confident it can be that it will make it home.
+The end goal is battery state-of-charge (SOC) estimation that lets the drone make better return-to-home decisions. Drones are power hungry, so they drain battery quickly and non-linearly. The drone should know not just how far it is from home, but also how confident it can be that it will make it home.
 
 *Caveat: SOC estimation itself isn't built yet. This repo is the foundation for it.*
 
-I built an EKF from scratch to learn state estimation properly, and I'm applying it to SOC-aware return-home. So far that has meant building the two core pieces an autopilot like PX4 normally gives you as a black box:
+I built a state estimator (EKF) and a flight controller (PID) from scratch to learn them properly, and I'm applying them to SOC-aware return-to-home. These are the two core pieces an autopilot like PX4 normally gives you as a black box:
 
-1. **State estimation**: turn raw gyro, accelerometer, magnetometer, GPS and barometer readings into an estimate of the drone's orientation, velocity and position.
-2. **Control**: fly the drone using that estimate.
-
-The estimator is the main focus. The controller exists to prove the estimate is good enough to fly on.
+1. **State estimation**: an EKF that turns raw gyro, accelerometer, magnetometer, GPS and barometer readings into an estimate of the drone's orientation, velocity and position.
+2. **Control**: a cascaded PID controller (position → velocity → attitude → rate → motors) that flies the drone (in simulation) using that estimate.
 
 ______
 
