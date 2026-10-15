@@ -13,15 +13,19 @@ I built a state estimator (EKF) and a flight controller (PID) from scratch to le
 1. **State estimation**: an EKF that turns raw gyro, accelerometer, magnetometer, GPS and barometer readings into an estimate of the drone's orientation, velocity and position.
 2. **Control**: a cascaded PID controller (position → velocity → attitude → rate → motors) that flies the drone (in simulation) using that estimate.
 
-______
+## Why it's built this way: design decisions and test results
 
 The estimator is a quaternion multiplicative EKF (MEKF) that fuses gyro, accelerometer, magnetometer, GPS and barometer readings. It also estimates each sensor's bias (gyro, accel, mag, baro) as part of the state, and statistical gates reject any measurement too far from what the filter predicts.
 
-The sections below are the tests that led to this design. Each one compares a simpler filter against the next improvement on the same simulated data (synthetic sensor streams at first, then Gazebo physics).
+The sections below are the tests that led to this design. Each one compares a simpler filter against the next improvement on the same simulated data (synthetic sensor streams at first, then Gazebo physics). Each decision below starts with what I chose and why, followed by the test that backs it up.
+
+### 1. An EKF that estimates gyro bias, not a complementary filter
+
+**Decision:** use an EKF with gyro bias as part of its state. A complementary filter blends gyro and accel/mag with a fixed weight, so it can only tolerate bias, not remove it. An EKF computes its blending gain from its own uncertainty, and with a bias state it actively measures and cancels the bias.
 
 **Gyro bias**: a real gyro doesn't read exactly zero at rest — manufacturing imperfections, temperature drift, and vibration give it a small persistent offset that isn't true rotation. Left uncorrected it integrates into steadily growing angle error, which is why the better filters below estimate and subtract it.
 
-## Static test (fixed 10° tilt, constant 5°/s gyro bias)
+#### Test: converging on a fixed 10° tilt with a constant 5°/s gyro bias
 
 ![Static test comparison](state%20estimation/testing/static_comparison.png)
 
@@ -33,7 +37,7 @@ The sections below are the tests that led to this design. Each one compares a si
 
 (Complementary filter has no cross-axis coupling, so pitch/yaw are tested with their own isolated 5°/s bias, not the same combined run as the EKFs.)
 
-## Dynamic trajectory test (`ekf_gyro_bias.py`)
+#### Making the test trustworthy: a moving sine-wave trajectory (`ekf_gyro_bias.py`)
 
 Sine-wave ground truth per axis, sensors synthesized from it each step (bias + noise), true value compared against the estimate directly instead of eyeballed.
 
@@ -43,7 +47,7 @@ Sine-wave ground truth per axis, sensors synthesized from it each step (bias + n
 | 2 | Accel + mag synthesized too, but mag yaw sign was backwards | ~±1° | ~±1–2° | Grows unbounded |
 | 3 | Fixed the mag yaw sign bug | ~±0.3–0.5° | ~±0.3–0.5° | ~±0.3–0.5° |
 
-## RMS comparison (`ekf_rms.py`)
+#### Test: RMS error on identical data, at normal and 10x gyro bias (`ekf_rms.py`)
 
 RMS (root-mean-square) error: square each iteration's error, average over the run, square-root back to degrees. One number per filter that summarizes accuracy over a whole run and penalizes big spikes more than a plain average would — the standard metric for comparing estimators.
 
@@ -62,11 +66,15 @@ All three filters run against identical trajectory + sensor stream (same RNG see
 
 Complementary is already visibly worse at original bias (fixed weight, no computed gain), and falls apart at 10x bias (roll RMS 9.6°) while both EKFs stay well-behaved — raw-vector+bias barely moves at all, since it's actively canceling the bias rather than just tolerating it.
 
-## From EKF to MEKF: quaternion attitude (`quaternarions.py`)
+### 2. Quaternion attitude (MEKF), not Euler angles (`quaternarions.py`)
+
+**Decision:** store attitude as a quaternion. Euler angles hit gimbal lock at some orientations; a quaternion never does. The test below shows the switch costs no accuracy.
 
 Switched the attitude state from Euler angles to a quaternion, which turns this into a multiplicative EKF (MEKF): a quaternion has 4 numbers for only 3 rotational degrees of freedom, so it can't be corrected by plain vector addition the way Euler angles can. Instead, the Kalman math (`P`, `K`) runs on a 3-dimensional small-angle error state, which then gets folded onto the quaternion multiplicatively and renormalized — this avoids gimbal lock (no singular orientation, unlike Euler angles) and keeps the covariance math well-posed instead of operating on a redundant, constrained state. It performed essentially identically on the RMS test (~0.445°/0.305°/0.230° vs. 0.443/0.305/0.229 for the Euler version), which is expected — same underlying model, just a numerically better-behaved state representation.
 
-## Motion robustness: adaptive R + gating (`ekf.py`, `test_gating.py`)
+### 3. Distrust the accelerometer during motion, and reject impossible readings (`ekf.py`, `test_gating.py`)
+
+**Decision:** the accelerometer only measures gravity (and so tilt) when the drone isn't accelerating. So the filter trusts it less during motion, and throws out readings that are too far off to be real.
 
 `ekf.py` now inflates accel's measurement noise (`R_accel`) when the raw accel magnitude deviates from 1g (real acceleration, not just tilt), and gates out (fully rejects) any accel reading too implausible to trust at all — a chi-squared test on the residual, 3 DOF.
 
@@ -78,6 +86,8 @@ d² = residualᵀ · S⁻¹ · residual
 
 This is the squared Mahalanobis distance, the residual measured in standard deviations (in 1D it's just (residual / σ)²). If the filter's model is right, each scaled axis is a standard Gaussian, and a sum of k squared standard Gaussians follows a **chi-squared distribution with k degrees of freedom** (k = how many numbers are compared: 3 for accel x/y/z). That distribution is known, so the threshold can be looked up: for 3 DOF, `d²` stays under 11.34 99% of the time. Rejecting above that means a good reading is wrongly thrown out only 1% of the time, a chosen false-rejection rate instead of a guessed limit. The gate also adapts on its own: as `P` shrinks it tightens, and as `P` grows it loosens.
 
+#### Test: an injected 8.7g accelerometer spike, gate on vs. off
+
 `test_gating.py` injects a physically-absurd accel spike (~8.7g) for 10 iterations and compares roll with gating on vs. off:
 
 | | Roll before spike | Max roll during spike | Recovery |
@@ -87,7 +97,9 @@ This is the squared Mahalanobis distance, the residual measured in standard devi
 
 Gating only works because it checks the residual against the *base* noise, not the already-inflated adaptive `R` — gating against the inflated value let the spike pass every time (adaptive `R` grows in lockstep with the outlier, so the Mahalanobis distance never crosses the threshold no matter how extreme the reading is).
 
-## GPS position/velocity tracking (`gps.py`, `test_gps_tracking.py`)
+### 4. Add GPS to estimate position and velocity (`gps.py`, `test_gps_tracking.py`)
+
+**Decision:** integrating the IMU alone drifts without bound, so the filter also tracks position and velocity and corrects them with GPS. Return-to-home needs to know where home is.
 
 Extends the quaternion MEKF's error state to 12 dimensions (adds velocity + position), predicting from gravity-compensated world-frame acceleration and correcting with GPS position + velocity gated to a realistic ~5Hz, instead of every IMU tick.
 
@@ -96,9 +108,13 @@ Extends the quaternion MEKF's error state to 12 dimensions (adds velocity + posi
 
 GPS cuts position error 8-10x across the board; a 10°-tilted version of each scenario matches these numbers exactly, confirming `update_F`'s attitude/acceleration coupling handles a non-identity attitude correctly.
 
-## Gating all three corrections (`gps.py`, `test_gates.py`)
+### 5. Gate every sensor, not just the accelerometer (`gps.py`, `test_gates.py`)
+
+**Decision:** GPS and the magnetometer fail too (multipath reflections, magnetic interference), so every correction gets its own gate.
 
 `gps.py` gates every correction source, not just accel: accel and mag each get a 3-DOF chi-squared test on their residual, and GPS gets its own 6-DOF version (it corrects position + velocity jointly). Any correction that fails its gate is skipped entirely for that tick — state and `P` are left exactly as the predict step produced them, rather than clamped or partially applied.
+
+#### Test: an injected 50 m GPS jump and a 90°-wrong magnetometer reading, gates on vs. off
 
 `test_gates.py` checks two things: that the gates stay quiet on clean data (a gate that fires on legitimate readings is worse than no gate at all), and that they actually catch a bad reading the way the original accel gate did. It runs a stationary ground truth so any deviation is unambiguous, injects a +50m GPS multipath-style spike and a 90°-wrong magnetometer reading, and compares gates on vs. off:
 
@@ -110,19 +126,27 @@ GPS cuts position error 8-10x across the board; a 10°-tilted version of each sc
 
 With gates on, both outliers are caught and the state never moves. Without them, the GPS spike alone injects ~9.4m of position error that takes many correction cycles to bleed off, and the mag spike's ~15.5° of attitude error keeps doing damage afterward — the corrupted attitude estimate misreads subsequent accelerometer readings, so position keeps drifting for several ticks even though the bad reading was magnetometer, not GPS.
 
-## Pooled vs. sequential corrections (`gps.py`, `calibration.py`, `test_gate_monte_carlo.py`)
+### 6. Apply corrections one at a time, not pooled (`gps.py`, `calibration.py`, `test_gate_monte_carlo.py`)
+
+**Decision:** apply each sensor's correction immediately, so the next one is computed against an up-to-date estimate. Tested with repeated randomized startups (Monte Carlo).
 
 GPS, accel, and mag corrections used to be pooled against one stale attitude estimate per tick and injected together, which is only safe for a linear filter; now each one is applied immediately and the next re-linearizes against the result. That alone cut a real ~30% chance of permanently locking the accel gate on at startup down to 0/20 in Monte Carlo testing (`test_gate_monte_carlo.py`), independent of how well `P0` happens to be tuned.
 
-## Magnetometer bias (`gps.py`, `calibration.py`, `test_accel_bias_convergence.py`)
+### 7. Estimate magnetometer bias too (`gps.py`, `calibration.py`, `test_accel_bias_convergence.py`)
+
+**Decision:** like the gyro and accelerometer, the magnetometer has its own offset, and left alone it shows up as heading error. So it gets a bias state as well.
 
 Added `mag_bias` as a full state (mirrors `accel_bias`: same tilt/bias ambiguity, same fix - a yaw wiggle added to the pre-flight calibration breaks mag_bias from heading error the way the roll/pitch wiggle already broke accel_bias from tilt). Converges to within ~0.0004 of the true injected bias under a rotating trajectory.
 
-## Robustness scenarios (`test_robustness_scenarios.py`)
+### 8. Stress tests: sustained interference, GPS dropout, a sudden bias jump (`test_robustness_scenarios.py`)
+
+Not a new design choice: these check how the finished design behaves under longer failures, and they show its known limits.
 
 Three untested-but-plausible failure modes, checked directly: a sustained (not single-spike) magnetometer interference burst is rejected 500/500 by the gate, but heading still drifts ~26° during a 5s outage and recovers slowly afterward - yaw has no backup reference once mag is unavailable. A 30s GPS dropout degrades boundedly (~0.7m to ~1.7m) and recovers cleanly once GPS returns. A sudden mid-flight accel_bias step is tracked correctly but slowly (~40s to mostly converge), consistent with `gyro_bias`'s already-known slow settling rather than a new issue.
 
-## Flying it: PID cascade in Gazebo (`run_sim.py`, `PID/`)
+### 9. Flying it in Gazebo: what only real physics revealed (`run_sim.py`, `PID/`)
+
+The final check: can a controller actually fly on this estimate? Synthetic tests can't catch mismatches between the filter's assumptions and a real physics engine's sensors. Several of the settings below (accel correction off in flight, pinned bias noise) were chosen because of what this showed.
 
 The EKF (`FINAL_gps.py`, the evolved `gps.py`) now drives a cascaded PID controller (position → velocity → attitude → rate → motor mixer) flying PX4's x500 quadrotor in Gazebo Harmonic — real rigid-body physics and simulated sensors, but PX4's own estimator and controller are bypassed entirely; `gz_bridge.py` reads Gazebo's IMU/mag/GPS topics and publishes motor speeds directly.
 
