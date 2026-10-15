@@ -17,13 +17,15 @@ I built a state estimator (EKF) and a flight controller (PID) from scratch to le
 
 The estimator is a quaternion multiplicative EKF (MEKF) that fuses gyro, accelerometer, magnetometer, GPS and barometer readings. It also estimates each sensor's bias (gyro, accel, mag, baro) as part of the state, and statistical gates reject any measurement too far from what the filter predicts.
 
-The sections below are the tests that led to this design. Each one compares a simpler filter against the next improvement on the same simulated data (synthetic sensor streams at first, then Gazebo physics). Each decision below starts with what I chose and why, followed by the test that backs it up.
+Below I explain why it's built this way. I ran a bunch of tests on simulated data to determine which features were worth adding. The hard part about estimating the drone's orientation and position is that my sensors are noisy & biased, due to manufacturing imperfections and chassis jitter and electromagnetic interference, etc. So a lot of work went into minimizing the sensor bias and noise. 
 
 ### 1. An EKF that estimates gyro bias, not a complementary filter
 
-**Decision:** use an EKF with gyro bias as part of its state. A complementary filter blends gyro and accel/mag with a fixed weight, so it can only tolerate bias, not remove it. An EKF computes its blending gain from its own uncertainty, and with a bias state it actively measures and cancels the bias.
+First I wanted to see if it even made sense to use an EKF. The most basic "filter" is a complementary filter: it uses gyro and accel/mag readings blended with a constant weighting. You always trust gyro 40% and accel/mag the other 60%. It also has nothing that estimates the gyro's bias, so it can't remove it.
 
-**Gyro bias**: a real gyro doesn't read exactly zero at rest — manufacturing imperfections, temperature drift, and vibration give it a small persistent offset that isn't true rotation. Left uncorrected it integrates into steadily growing angle error, which is why the better filters below estimate and subtract it.
+An EKF recomputes this weighting each timestep, based on its uncertainty. Every step it integrates the gyro, its uncertainty grows; every accel/mag correction shrinks it again. The weighting comes from comparing that uncertainty to how noisy each sensor is (noise levels I set). So when the filter is uncertain it leans on accel/mag, and when it's confident it leans on the gyro.
+
+The weighting alone doesn't remove bias, though. That takes adding the gyro bias to the EKF's state, so the filter estimates the bias and subtracts it. I tested three filters: the complementary filter, an EKF without a bias state, and an EKF with one. First holding a fixed tilt, then following a moving trajectory.
 
 #### Test: converging on a fixed 10° tilt with a constant 5°/s gyro bias
 
@@ -37,17 +39,9 @@ The sections below are the tests that led to this design. Each one compares a si
 
 (Complementary filter has no cross-axis coupling, so pitch/yaw are tested with their own isolated 5°/s bias, not the same combined run as the EKFs.)
 
-#### Making the test trustworthy: a moving sine-wave trajectory (`ekf_gyro_bias.py`)
-
-Sine-wave ground truth per axis, sensors synthesized from it each step (bias + noise), true value compared against the estimate directly instead of eyeballed.
-
-| Iteration | Change | Roll error | Pitch error | Yaw error |
-|---|---|---|---|---|
-| 1 | Gyro synthesized; accel/mag still static | Doesn't track | Doesn't track | Doesn't track |
-| 2 | Accel + mag synthesized too, but mag yaw sign was backwards | ~±1° | ~±1–2° | Grows unbounded |
-| 3 | Fixed the mag yaw sign bug | ~±0.3–0.5° | ~±0.3–0.5° | ~±0.3–0.5° |
-
 #### Test: RMS error on identical data, at normal and 10x gyro bias (`ekf_rms.py`)
+
+The trajectory is a sine wave on each axis, with sensor readings (bias + noise) generated from it each step. While building it I found a sign bug in the magnetometer yaw, which is why yaw error grew without bound in early runs (`ekf_gyro_bias.py`).
 
 RMS (root-mean-square) error: square each iteration's error, average over the run, square-root back to degrees. One number per filter that summarizes accuracy over a whole run and penalizes big spikes more than a plain average would — the standard metric for comparing estimators.
 
