@@ -9,14 +9,14 @@ color_raw = "#D95F02"
 ink = "#3A3A3A"
 grid_color = "#DDDDDD"
 
-filters = ["Complementary", "Angle-based", "Raw-vector + bias"]
+filters = ["Complementary", "EKF, no bias state", "EKF + bias state"]
 colors = [color_comp, color_angle, color_raw]
 
 #(true value, {filter: converged value or None if n/a})
 panels = [
-    ("Roll", 10.0, {"Complementary": 12.65, "Angle-based": 10.14, "Raw-vector + bias": 10.03}),
-    ("Pitch", 0.0, {"Complementary": 12.55, "Angle-based": 4.8, "Raw-vector + bias": 0.017}),
-    ("Yaw", 0.0, {"Complementary": 12.54, "Angle-based": 0.86, "Raw-vector + bias": 0.003}),
+    ("Roll", 10.0, {"Complementary": 12.65, "EKF, no bias state": 10.14, "EKF + bias state": 10.03}),
+    ("Pitch", 0.0, {"Complementary": 12.55, "EKF, no bias state": 4.8, "EKF + bias state": 0.017}),
+    ("Yaw", 0.0, {"Complementary": 12.54, "EKF, no bias state": 0.86, "EKF + bias state": 0.003}),
 ]
 
 fig, axs = plt.subplots(1, 3, figsize=(10, 4.6))
@@ -42,7 +42,7 @@ for ax, (title, true_val, values) in zip(axs, panels):
 
     ax.set_title(title, fontsize=11, color=ink)
     ax.set_xticks(x)
-    ax.set_xticklabels(["Comp.", "Angle", "Raw+bias"], color=ink, fontsize=9)
+    ax.set_xticklabels(["Comp.", "EKF", "EKF+bias"], color=ink, fontsize=9)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     ax.spines["left"].set_color(grid_color)

@@ -31,7 +31,7 @@ The weighting alone doesn't remove bias, though. That takes adding the gyro bias
 
 ![Static test comparison](state%20estimation/testing/static_comparison.png)
 
-| | Complementary filter | EKF (angle-based) | EKF (raw-vector + bias) |
+| | Complementary filter | EKF, no bias state | EKF + bias state |
 |---|---|---|---|
 | Converged roll (true: 10°) | ~12.6–12.7° | ~10.14° | ~10.03° |
 | Converged pitch (true: 0°, isolated single-axis test) | ~12.55° | ~4.8° | ~0.017° |
@@ -52,13 +52,13 @@ All three filters run against identical trajectory + sensor stream (same RNG see
 | Gyro bias | Filter | Roll RMS | Pitch RMS | Yaw RMS |
 |---|---|---|---|---|
 | Original (2, -1, 0.5°/s) | Complementary | 0.954° | 1.249° | 0.327° |
-| Original | Angle-based | 0.445° | 0.460° | 0.230° |
-| Original | Raw-vector + bias | 0.443° | 0.305° | 0.229° |
+| Original | EKF, no bias state | 0.445° | 0.460° | 0.230° |
+| Original | EKF + bias state | 0.443° | 0.305° | 0.229° |
 | 10x larger | Complementary | 9.603° | 5.029° | 2.534° |
-| 10x larger | Angle-based | 0.681° | 0.521° | 0.268° |
-| 10x larger | Raw-vector + bias | 0.449° | 0.308° | 0.229° |
+| 10x larger | EKF, no bias state | 0.681° | 0.521° | 0.268° |
+| 10x larger | EKF + bias state | 0.449° | 0.308° | 0.229° |
 
-Complementary is already visibly worse at original bias (fixed weight, no computed gain), and falls apart at 10x bias (roll RMS 9.6°) while both EKFs do way better, since since they're actively canceling the bias rather than just tolerating it.
+Complementary is already visibly worse at original bias (fixed weight, no computed gain), and falls apart at 10x bias (roll RMS 9.6°) while both EKFs do way better, since they're actively canceling the bias rather than just tolerating it.
 
 ### 2. Quaternion attitude (MEKF) instead of Euler angles (`quaternarions.py`)
 

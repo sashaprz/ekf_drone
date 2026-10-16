@@ -4,19 +4,19 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 axes_labels = ["Roll", "Pitch", "Yaw"]
-filters = ["Complementary", "Angle-based", "Raw-vector + bias", "Quaternion MEKF"]
+filters = ["Complementary", "EKF, no bias state", "EKF + bias state", "Quaternion MEKF"]
 
 data = {
     "Original bias": {
         "Complementary": [0.954, 1.249, 0.327],
-        "Angle-based": [0.445, 0.460, 0.230],
-        "Raw-vector + bias": [0.443, 0.305, 0.229],
+        "EKF, no bias state": [0.445, 0.460, 0.230],
+        "EKF + bias state": [0.443, 0.305, 0.229],
         "Quaternion MEKF": [0.445, 0.305, 0.230],
     },
     "10x bias": {
         "Complementary": [9.603, 5.029, 2.534],
-        "Angle-based": [0.681, 0.521, 0.268],
-        "Raw-vector + bias": [0.449, 0.308, 0.229],
+        "EKF, no bias state": [0.681, 0.521, 0.268],
+        "EKF + bias state": [0.449, 0.308, 0.229],
         "Quaternion MEKF": [0.452, 0.308, 0.231],
     },
 }
