@@ -41,9 +41,9 @@ The weighting alone doesn't remove bias, though. That takes adding the gyro bias
 
 #### Test: RMS error on identical data, at normal and 10x gyro bias (`ekf_rms.py`)
 
-The trajectory is a sine wave on each axis, with sensor readings (bias + noise) generated from it each step. While building it I found a sign bug in the magnetometer yaw, which is why yaw error grew without bound in early runs (`ekf_gyro_bias.py`).
+The trajectory is a sine wave on each axis, with sensor readings (bias + noise) generated from it each step.
 
-RMS (root-mean-square) error: square each iteration's error, average over the run, square-root back to degrees. One number per filter that summarizes accuracy over a whole run and penalizes big spikes more than a plain average would — the standard metric for comparing estimators.
+RMS (root-mean-square) error: square each iteration's error, average over the run, square-root back to degrees. One number per filter that summarizes accuracy over a whole run and penalizes big spikes more than a plain average would.
 
 All three filters run against identical trajectory + sensor stream (same RNG seed), fixed `dt`, 20s.
 
@@ -58,7 +58,7 @@ All three filters run against identical trajectory + sensor stream (same RNG see
 | 10x larger | Angle-based | 0.681° | 0.521° | 0.268° |
 | 10x larger | Raw-vector + bias | 0.449° | 0.308° | 0.229° |
 
-Complementary is already visibly worse at original bias (fixed weight, no computed gain), and falls apart at 10x bias (roll RMS 9.6°) while both EKFs stay well-behaved — raw-vector+bias barely moves at all, since it's actively canceling the bias rather than just tolerating it.
+Complementary is already visibly worse at original bias (fixed weight, no computed gain), and falls apart at 10x bias (roll RMS 9.6°) while both EKFs do way better, since since they're actively canceling the bias rather than just tolerating it.
 
 ### 2. Quaternion attitude (MEKF), not Euler angles (`quaternarions.py`)
 
