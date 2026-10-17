@@ -187,24 +187,6 @@ Gazebo is a robotics simulator with real physics and simulated sensors. I flew P
 
 The controller is a chain of loops, each one feeding the next: where should I be → how fast should I move to get there → how much should I tilt to move at that speed → how fast should I rotate to reach that tilt → how hard should each motor spin.
 
-### Tracking down the crash
-
-For a long time, the drone flipped over within 4-6 seconds of switching on position hold. It looked like the controller was oscillating. Two tools found the real cause:
-
-- **Ground truth.** Gazebo knows the drone's true position and orientation, so I printed it next to the EKF's estimate.
-- **Oracle mode.** The controller flies on Gazebo's ground truth instead of the EKF.
-
-On ground truth, with exactly the same controller settings, the drone hovered perfectly level. So the controller was fine, and the EKF was feeding it the wrong state. Every bug turned out to be in how Gazebo's data met the EKF:
-
-| Bug | What went wrong | Fix |
-|---|---|---|
-| GPS axes swapped: fed in as (north, east), but the EKF's x axis is east | Swapping two axes mirrors the world instead of rotating it, so on one diagonal, position corrections pushed the drone the wrong way | The bridge now outputs (east, north, up), matching Gazebo |
-| Compass assumed Earth's magnetic field is horizontal | Gazebo's field points steeply into the ground, like the real one at most latitudes. Calibration hid the mismatch as a fake bias, and every tilt leaked into fake heading corrections | Measured the real field direction from flight data vs. ground truth: `(0.450, 0.020, 0.893)` |
-| Orientation uncertainty set to grow far too fast each step | About a billion times Gazebo's real gyro noise, so the filter barely trusted its own orientation, and a single GPS update could rotate it by tens of degrees | Lowered from 0.01 to 1e-7 in live mode |
-| Accelerometer used to find "down" during flight | On a hovering drone the accelerometer feels thrust, which always points straight up through the drone's body, so it pulled the estimate toward level even while the drone was tilted. Thrust is ≈ 1g in a hover, so the gate couldn't catch it | Off in flight. GPS velocity reveals tilt instead, since a tilted drone drifts sideways |
-| Accelerometer and magnetometer biases allowed to wander too freely | Real errors got absorbed into the biases: an injected 10° heading error got stuck at 6.7° inside the magnetometer bias, and tilt leaked into the accelerometer bias (which wandered to -3 m/s²) | Held near their calibrated values in flight |
-| GPS gate lockout | After one hard event (touching the ground), every GPS reading was rejected forever, and the altitude estimate ran away to -115 m | Reset position and velocity to GPS after 5 rejections in a row |
-
 To measure the estimator fixes, I replayed the sensor data from the flight that crashed through the EKF (the first 12 s, identical data every run; see [Offline replay](#offline-replay-testingreplay_ekfpy) below) and compared its orientation error against ground truth:
 
 | EKF config | Roll RMS | Pitch RMS | Yaw RMS |
@@ -212,8 +194,6 @@ To measure the estimator fixes, I replayed the sensor data from the flight that 
 | Correct compass field, accelerometer finds "down" in flight, biases free to wander | 16.9° | 8.1° | 12.2° |
 | + biases held near calibration | 4.7° | 1.5° | 9.0° |
 | + accelerometer no longer used to find "down" in flight | **0.14°** | **0.12°** | **0.20°** |
-
-One lesson worth keeping: I first "fixed" the compass by copying a remap from PX4's code, meant for Gazebo's supposedly left-handed magnetometer. When I checked it against ground truth while rotating, the estimated heading turned the *opposite* way from the real heading. The raw reading had been right all along; only the assumed field direction was wrong. Now I check claims about axes and frames against ground truth instead of trusting comments.
 
 ### Controller fixes
 
