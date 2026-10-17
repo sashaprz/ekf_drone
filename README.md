@@ -13,11 +13,21 @@ I built a state estimator (EKF) and a flight controller (PID) from scratch to le
 1. **State estimation**: an EKF that turns raw gyro, accelerometer, magnetometer, GPS and barometer readings into an estimate of the drone's orientation, velocity and position.
 2. **Control**: a cascaded PID controller (position → velocity → attitude → rate → motors) that flies the drone (in simulation) using that estimate.
 
-## Why it's built this way: design decisions and test results
+## Results at a glance
 
-The estimator is a quaternion multiplicative EKF (MEKF) that fuses gyro, accelerometer, magnetometer, GPS and barometer readings. It also estimates each sensor's bias (gyro, accel, mag, baro) as part of the state, and statistical gates reject any measurement too far from what the filter predicts.
+**Flying in the Gazebo physics simulator on my own EKF and PID controller, the drone held a level hover at 2.00 ± 0.01 m, with horizontal position within a few cm, in 3 out of 3 fresh 60 s flights.**
 
-Below I explain why it's built this way. I ran a bunch of tests on simulated data to determine which features were worth adding. The hard part about estimating the drone's orientation and position is that my sensors are noisy & biased, due to manufacturing imperfections and chassis jitter and electromagnetic interference, etc. So a lot of work went into minimizing the sensor bias and noise. 
+![Results summary](state%20estimation/testing/project_hero.png)
+
+Left: with a gyro bias 10x larger than normal, the EKF's orientation error is 17x smaller than a basic complementary filter's ([section 1](#1-an-ekf-that-estimates-gyro-bias-not-a-complementary-filter)). Right: adding GPS keeps the position estimate on track, where the accelerometer alone drifts away ([section 4](#4-add-gps-so-the-drone-knows-where-it-is-gpspy-test_gps_trackingpy)).
+
+## The estimator: design decisions and test results
+
+The estimator takes readings from five sensors (gyroscope, accelerometer, magnetometer, GPS and barometer) and blends them into one best guess of which way the drone is pointing, how fast it's moving and where it is. Along the way it learns how far off each sensor is (its bias) and subtracts that out, and it throws away any reading too far from what it expected to be real.
+
+Below I explain why it's built this way. I ran a bunch of tests on simulated data to determine which features were worth adding. The hard part about estimating the drone's orientation and position is that my sensors are noisy & biased, due to manufacturing imperfections and chassis jitter and electromagnetic interference, etc. So a lot of work went into minimizing the sensor bias and noise.
+
+Each section names the file where that idea was first built and the test that checks it. The filters build on each other, and everything ends up in `state estimation/FINAL_gps.py`, the EKF that actually flies the drone.
 
 ### 1. An EKF that estimates gyro bias, not a complementary filter
 
@@ -60,7 +70,7 @@ All three filters run against identical trajectory + sensor stream (same RNG see
 
 Complementary is already visibly worse at original bias (fixed weight, no computed gain), and falls apart at 10x bias (roll RMS 9.6°) while both EKFs do way better. The EKF with a bias state barely moves at all, since it's actively canceling the bias rather than just tolerating it.
 
-### 2. Quaternion attitude (MEKF) instead of Euler angles (`quaternarions.py`)
+### 2. Quaternion attitude (MEKF) instead of Euler angles (`quaternions.py`)
 
 Standard Euler angles (roll φ, pitch θ, yaw ψ) blow up when pitch reaches ±90°. For example, the yaw rate is ψ̇ = (q·sin φ + r·cos φ) / cos θ. When cos θ = 0, this is undefined. This is called gimbal lock.
 
@@ -78,51 +88,60 @@ That constraint is also why the correction has to be multiplied in rather than a
 
 I switched the attitude state from Euler angles to a quaternion, which turns this into a multiplicative EKF (MEKF). The Kalman math (`P`, `K`) runs on a 3-dimensional small-angle error state (the 3 real rotational degrees of freedom), which then gets folded onto the quaternion multiplicatively and renormalized. It performed essentially identically on the RMS test (~0.445°/0.305°/0.230° vs. 0.443/0.305/0.229 for the Euler version), which is expected: same underlying model, just a numerically better-behaved state representation.
 
-### 3. Distrust the accelerometer during motion, and reject impossible readings (`ekf.py`, `test_gating.py`)
+### 3. Trust the accelerometer less when the drone is moving, and throw out impossible readings (`ekf.py`, `test_gating.py`)
 
-**Decision:** the accelerometer only measures gravity (and so tilt) when the drone isn't accelerating. So the filter trusts it less during motion, and throws out readings that are too far off to be real.
+The accelerometer is how the filter knows which way is down. When the drone is sitting still, the only thing it feels is gravity, so it points straight at the ground and tells you exactly how tilted you are. But the moment the drone speeds up, slows down or turns, the accelerometer feels that too, and it can't tell the difference. To the accelerometer, "accelerating forward" looks the same as "tilted backward".
 
-`ekf.py` now inflates accel's measurement noise (`R_accel`) when the raw accel magnitude deviates from 1g (real acceleration, not just tilt), and gates out (fully rejects) any accel reading too implausible to trust at all — a chi-squared test on the residual, 3 DOF.
+So the filter trusts the accelerometer less whenever it's clearly feeling more than just gravity. If the total reading is far from 1g, something other than gravity is going on, and the filter turns down how much it listens.
 
-**How the chi-squared gate works.** Before each correction the filter predicts what the sensor should read; the *residual* is the actual reading minus that prediction. A fixed limit ("reject if off by more than X") doesn't work, because what counts as a big residual changes: right after startup the filter is uncertain and large residuals are normal, while after a long clean flight the same residual is suspicious, and each axis has its own noise level. So the residual is first scaled by how big it's *expected* to be, `S = H P Hᵀ + R` (the filter's own uncertainty mapped into sensor space, plus sensor noise):
+Some readings are so far off they can't be real at all, like a glitch or a hard bump. Those get thrown out completely. The tricky part is deciding what counts as "too far off". A fixed limit ("reject anything more than X away from what I expected") doesn't work, because how surprising a reading is depends on how sure the filter is. Right after startup the filter barely knows anything, so big differences between what it expected and what it got are normal. After a long, clean flight, the same difference would be suspicious.
+
+So instead of a fixed limit, the filter asks: given how uncertain I am right now, and how noisy this sensor is, how many standard deviations away is this reading? It's like grading on a curve. If the filter's model is right, that number follows a known distribution (the chi-squared distribution), so I can pick the cutoff by choosing how often I'm willing to throw out a good reading by mistake. I picked 1%, which for the accelerometer's 3 axes works out to a cutoff of 11.34. A nice side effect is that the gate tightens on its own as the filter gets more confident, and loosens when it's unsure.
+
+<details>
+<summary>The math</summary>
+
+The *residual* is the actual reading minus the predicted one. It gets scaled by how big it's expected to be, `S = H P Hᵀ + R` (the filter's own uncertainty mapped into sensor space, plus sensor noise):
 
 ```
 d² = residualᵀ · S⁻¹ · residual
 ```
 
-This is the squared Mahalanobis distance, the residual measured in standard deviations (in 1D it's just (residual / σ)²). If the filter's model is right, each scaled axis is a standard Gaussian, and a sum of k squared standard Gaussians follows a **chi-squared distribution with k degrees of freedom** (k = how many numbers are compared: 3 for accel x/y/z). That distribution is known, so the threshold can be looked up: for 3 DOF, `d²` stays under 11.34 99% of the time. Rejecting above that means a good reading is wrongly thrown out only 1% of the time, a chosen false-rejection rate instead of a guessed limit. The gate also adapts on its own: as `P` shrinks it tightens, and as `P` grows it loosens.
+This is the squared Mahalanobis distance (in 1D it's just (residual / σ)²). If the model is right, each scaled axis is a standard Gaussian, and a sum of k squared standard Gaussians follows a chi-squared distribution with k degrees of freedom. For k = 3, `d²` stays under 11.34 99% of the time.
 
-#### Test: an injected 8.7g accelerometer spike, gate on vs. off
+</details>
 
-`test_gating.py` injects a physically-absurd accel spike (~8.7g) for 10 iterations and compares roll with gating on vs. off:
+#### Test: a fake 8.7g accelerometer spike, gate on vs. off
+
+`test_gating.py` injects a physically impossible spike (about 8.7g, far more than a hovering drone could ever feel) for 10 steps, and compares roll with the gate on and off:
 
 | | Roll before spike | Max roll during spike | Recovery |
 |---|---|---|---|
 | Without gating | 10.06° | 32.07° | ~30+ iterations |
 | With gating | 10.06° | 10.28° | Immediate |
 
-Gating only works because it checks the residual against the *base* noise, not the already-inflated adaptive `R` — gating against the inflated value let the spike pass every time (adaptive `R` grows in lockstep with the outlier, so the Mahalanobis distance never crosses the threshold no matter how extreme the reading is).
+Without the gate, one bad burst threw roll off by 22° and it took 30+ steps to recover. With the gate, the filter barely noticed.
 
-### 4. Add GPS to estimate position and velocity (`gps.py`, `test_gps_tracking.py`)
+One gotcha I hit: the gate has to compare against the accelerometer's *normal* noise level, not the turned-down trust from earlier. Otherwise a huge spike makes the filter trust the accelerometer less, which makes the spike look less surprising, which lets it through. The spike excused itself every time.
 
-**Decision:** integrating the IMU alone drifts without bound, so the filter also tracks position and velocity and corrects them with GPS. Return-to-home needs to know where home is.
+### 4. Add GPS so the drone knows where it is (`gps.py`, `test_gps_tracking.py`)
 
-Extends the quaternion MEKF's error state to 12 dimensions (adds velocity + position), predicting from gravity-compensated world-frame acceleration and correcting with GPS position + velocity gated to a realistic ~5Hz, instead of every IMU tick.
+Knowing which way it's pointing isn't enough for return-to-home. The drone needs to know where it is. In theory you can get that from the accelerometer alone: acceleration tells you how your speed changes, and speed tells you how your position changes. In practice, every tiny error in acceleration gets added up twice, so the position estimate drifts further and further from reality and never comes back. This is called dead reckoning.
+
+GPS fixes that. It's noisy and slow (about 5 readings a second, vs. hundreds a second from the gyro and accelerometer), but it doesn't drift. So the filter does both. Between GPS readings it predicts position and velocity from the accelerometer, and every time a GPS reading arrives it pulls the estimate back toward it.
 
 ![GPS tracking trajectory](state%20estimation/testing/gps_tracking_trajectory.png)
 ![GPS tracking RMS comparison](state%20estimation/testing/gps_tracking_rms.png)
 
-GPS cuts position error 8-10x across the board; a 10°-tilted version of each scenario matches these numbers exactly, confirming `update_F`'s attitude/acceleration coupling handles a non-identity attitude correctly.
+With GPS, position error dropped 8-10x in every scenario. I also reran each scenario with the drone tilted 10° and got the same numbers, which confirmed the filter correctly accounts for tilt when it turns the drone's own acceleration into movement across the ground.
 
 ### 5. Gate every sensor, not just the accelerometer (`gps.py`, `test_gates.py`)
 
-**Decision:** GPS and the magnetometer fail too (multipath reflections, magnetic interference), so every correction gets its own gate.
+The accelerometer isn't the only sensor that lies. GPS signals can bounce off buildings before reaching the drone (multipath), making it look like the drone jumped tens of meters. The magnetometer, which works like a compass, gets thrown off by anything magnetic nearby, like motors, power lines or steel. So every sensor gets the same kind of gate as the accelerometer. If a reading fails its gate, the filter skips it entirely for that step, rather than using part of it.
 
-`gps.py` gates every correction source, not just accel: accel and mag each get a 3-DOF chi-squared test on their residual, and GPS gets its own 6-DOF version (it corrects position + velocity jointly). Any correction that fails its gate is skipped entirely for that tick — state and `P` are left exactly as the predict step produced them, rather than clamped or partially applied.
+#### Test: a fake 50 m GPS jump and a 90°-wrong compass reading, gates on vs. off
 
-#### Test: an injected 50 m GPS jump and a 90°-wrong magnetometer reading, gates on vs. off
-
-`test_gates.py` checks two things: that the gates stay quiet on clean data (a gate that fires on legitimate readings is worse than no gate at all), and that they actually catch a bad reading the way the original accel gate did. It runs a stationary ground truth so any deviation is unambiguous, injects a +50m GPS multipath-style spike and a 90°-wrong magnetometer reading, and compares gates on vs. off:
+`test_gates.py` checks two things. First, that the gates stay quiet on clean data, since a gate that throws out good readings is worse than no gate at all. Second, that they catch the bad ones. The drone sits still the whole time, so any movement in the estimate is pure error. Then it injects a GPS reading 50 m off and a magnetometer reading pointing 90° the wrong way:
 
 | | GPS rejected | Mag rejected | Peak position error | Peak attitude error |
 |---|---|---|---|---|
@@ -130,56 +149,88 @@ GPS cuts position error 8-10x across the board; a 10°-tilted version of each sc
 | Gates ON | 1/1 | 1/1 | 0.00 m | 0.00° |
 | Gates OFF | 0/1 | 0/1 | 9.82 m | 15.53° |
 
-With gates on, both outliers are caught and the state never moves. Without them, the GPS spike alone injects ~9.4m of position error that takes many correction cycles to bleed off, and the mag spike's ~15.5° of attitude error keeps doing damage afterward — the corrupted attitude estimate misreads subsequent accelerometer readings, so position keeps drifting for several ticks even though the bad reading was magnetometer, not GPS.
+With gates on, both bad readings were caught and the estimate didn't move at all. Without them, the GPS jump alone pulled the position estimate ~9.4 m off, which took many GPS updates to undo. The compass error was worse in a sneakier way. It knocked the orientation estimate ~15.5° off, and since the filter uses orientation to interpret the accelerometer, the position kept drifting for several more steps, even though the GPS was fine.
 
-### 6. Apply corrections one at a time, not pooled (`gps.py`, `calibration.py`, `test_gate_monte_carlo.py`)
+### 6. Apply each sensor's correction one at a time (`gps.py`, `calibration.py`, `test_gate_monte_carlo.py`)
 
-**Decision:** apply each sensor's correction immediately, so the next one is computed against an up-to-date estimate. Tested with repeated randomized startups (Monte Carlo).
+Every step, the filter can get corrections from up to three sensors: GPS, accelerometer and magnetometer. Originally I computed all three against the same starting estimate, then applied them together. That's like three people each editing their own copy of the same draft, then pasting all the edits in at once. It's fine when the edits are small and don't interact. But an EKF is an approximation that's only accurate close to its current estimate, so if one correction moves the estimate a lot, the other two were computed for an estimate that no longer exists.
 
-GPS, accel, and mag corrections used to be pooled against one stale attitude estimate per tick and injected together, which is only safe for a linear filter; now each one is applied immediately and the next re-linearizes against the result. That alone cut a real ~30% chance of permanently locking the accel gate on at startup down to 0/20 in Monte Carlo testing (`test_gate_monte_carlo.py`), independent of how well `P0` happens to be tuned.
+Now each correction is applied immediately, and the next sensor works from the updated estimate.
 
-### 7. Estimate magnetometer bias too (`gps.py`, `calibration.py`, `test_accel_bias_convergence.py`)
+To test it, I ran the filter's startup many times with random starting errors (a Monte Carlo test). Before the change, about 30% of startups got permanently stuck: the estimate started far enough off that every real accelerometer reading looked impossible, so the gate rejected all of them, forever. After the change, 0 out of 20 got stuck.
 
-**Decision:** like the gyro and accelerometer, the magnetometer has its own offset, and left alone it shows up as heading error. So it gets a bias state as well.
+### 7. Estimate accelerometer and magnetometer bias too (`gps.py`, `calibration.py`, `test_accel_bias_convergence.py`)
 
-Added `mag_bias` as a full state (mirrors `accel_bias`: same tilt/bias ambiguity, same fix - a yaw wiggle added to the pre-flight calibration breaks mag_bias from heading error the way the roll/pitch wiggle already broke accel_bias from tilt). Converges to within ~0.0004 of the true injected bias under a rotating trajectory.
+The gyro isn't the only sensor with a built-in offset. The accelerometer and magnetometer have them too, and left alone they show up as fake tilt and fake heading error. So, like the gyro, each one gets a bias that the filter learns and subtracts.
 
-### 8. Stress tests: sustained interference, GPS dropout, a sudden bias jump (`test_robustness_scenarios.py`)
+There's a catch, though. With the drone sitting still, an accelerometer bias looks exactly like the drone being slightly tilted. Both just mean "gravity reads a little off from straight down", and there's no way to tell which one it is. Same with the magnetometer: a bias looks just like the drone pointing in a slightly different direction.
 
-Not a new design choice: these check how the finished design behaves under longer failures, and they show its known limits.
+The fix is to move. A sensor's bias is stuck to the sensor, so it stays the same no matter how the drone is turned. A real tilt doesn't: it changes as the drone rotates. Once the drone moves around, the two stop looking alike. So before takeoff, the calibration routine has the drone do a small wiggle: roll and pitch to separate accelerometer bias from tilt, and yaw to separate magnetometer bias from heading.
 
-Three untested-but-plausible failure modes, checked directly: a sustained (not single-spike) magnetometer interference burst is rejected 500/500 by the gate, but heading still drifts ~26° during a 5s outage and recovers slowly afterward - yaw has no backup reference once mag is unavailable. A 30s GPS dropout degrades boundedly (~0.7m to ~1.7m) and recovers cleanly once GPS returns. A sudden mid-flight accel_bias step is tracked correctly but slowly (~40s to mostly converge), consistent with `gyro_bias`'s already-known slow settling rather than a new issue.
+Under a rotating test trajectory, both biases settle onto their true values (the magnetometer bias to within ~0.0004 of the true value):
 
-### 9. Flying it in Gazebo: what only real physics revealed (`run_sim.py`, `PID/`)
+![Accelerometer bias convergence](state%20estimation/testing/accel_bias_convergence.png)
 
-The final check: can a controller actually fly on this estimate? Synthetic tests can't catch mismatches between the filter's assumptions and a real physics engine's sensors. Several of the settings below (accel correction off in flight, pinned bias noise) were chosen because of what this showed.
+### Stress tests: what happens when a sensor stays broken (`test_robustness_scenarios.py`)
 
-The EKF (`FINAL_gps.py`, the evolved `gps.py`) now drives a cascaded PID controller (position → velocity → attitude → rate → motor mixer) flying PX4's x500 quadrotor in Gazebo Harmonic — real rigid-body physics and simulated sensors, but PX4's own estimator and controller are bypassed entirely; `gz_bridge.py` reads Gazebo's IMU/mag/GPS topics and publishes motor speeds directly.
+The earlier tests used single bad readings. These check what happens when something stays broken for a while, and show where the finished estimator's limits are.
 
-For a long time it tumbled within ~4-6s of enabling position hold, which looked like a controller resonance. Two diagnostic tools found the real cause: Gazebo's **ground truth** printed next to the estimate, and an **oracle mode** where the controller flies on ground truth instead of the EKF. On truth, with identical gains, it hovered dead level — the controller was fine; the EKF was feeding it a wrong state. Bugs found, all in how Gazebo's data met the EKF:
+- **5 seconds of magnetic interference.** The gate rejected all 500 bad compass readings. But with no compass, nothing else tells the filter which way is north, so heading drifted ~26° during the outage and recovered slowly afterward. This is a real limit: heading has no backup.
+- **30 seconds without GPS.** Position error grew from ~0.7 m to ~1.7 m. It grew slowly instead of running away, and recovered cleanly once GPS came back.
+- **A sudden jump in accelerometer bias mid-flight.** The filter tracked it to the right value, but slowly (~40 s to mostly settle). That's the same slow settling the gyro bias already showed, not a new problem.
 
-| Bug | Symptom | Fix |
+## Flying it in Gazebo: what only real physics revealed (`run_sim.py`, `PID/`)
+
+The real test: can a controller actually fly a drone on this estimate? My own simulated sensor data only checks the filter against my own assumptions. A physics simulator checks it against something I didn't write. Several settings in the final filter (accelerometer correction off in flight, biases held near their calibrated values) are there because of what this showed.
+
+Gazebo is a robotics simulator with real physics and simulated sensors. I flew PX4's x500 quadcopter model in it, but bypassed PX4's own estimator and controller entirely. `gz_bridge.py` reads Gazebo's sensor data and hands it to my EKF (`FINAL_gps.py`, the evolved `gps.py`). My PID controller then turns the estimate into motor speeds.
+
+The controller is a chain of loops, each one feeding the next: where should I be → how fast should I move to get there → how much should I tilt to move at that speed → how fast should I rotate to reach that tilt → how hard should each motor spin.
+
+### Tracking down the crash
+
+For a long time, the drone flipped over within 4-6 seconds of switching on position hold. It looked like the controller was oscillating. Two tools found the real cause:
+
+- **Ground truth.** Gazebo knows the drone's true position and orientation, so I printed it next to the EKF's estimate.
+- **Oracle mode.** The controller flies on Gazebo's ground truth instead of the EKF.
+
+On ground truth, with exactly the same controller settings, the drone hovered perfectly level. So the controller was fine, and the EKF was feeding it the wrong state. Every bug turned out to be in how Gazebo's data met the EKF:
+
+| Bug | What went wrong | Fix |
 |---|---|---|
-| GPS fed as (north, east) but EKF's x axis is east | A swap is a mirror, not a rotation — position feedback pushed the wrong way on one diagonal | Bridge outputs ENU, matching Gazebo's world frame |
-| Mag reference hardcoded horizontal `(1,0,0)` | Gazebo's field is steeply inclined; calibration hid it in `mag_bias_z ≈ 0.89`, and every tilt leaked into fake heading corrections | Reference measured from flight data vs. ground truth: `(0.450, 0.020, 0.893)` |
-| Attitude process noise 0.01 rad²/step | ~10⁹x Gazebo's real gyro noise — single GPS updates rotated attitude by tens of degrees | 1e-7 in live mode |
-| Accel gravity correction in flight | A multirotor's accel measures *thrust* (body z), not gravity, so it pulled attitude toward level while tilted — and \|a\| ≈ 1g, so the gate couldn't catch it | Off in live mode; GPS velocity observes tilt through `F`'s attitude→velocity block instead |
-| Accel/mag bias random walk too loose | Heading error absorbed into `mag_bias` (an injected 10° yaw error stuck at 6.7°), tilt into `accel_bias` (wandered to -3 m/s²) | Pinned near calibrated values in live mode |
-| GPS gate lockout | After one hard event (a ground touch), GPS was rejected forever and altitude ran away to -115 m | Reset position/velocity to GPS after 5 consecutive rejections |
+| GPS axes swapped: fed in as (north, east), but the EKF's x axis is east | Swapping two axes mirrors the world instead of rotating it, so on one diagonal, position corrections pushed the drone the wrong way | The bridge now outputs (east, north, up), matching Gazebo |
+| Compass assumed Earth's magnetic field is horizontal | Gazebo's field points steeply into the ground, like the real one at most latitudes. Calibration hid the mismatch as a fake bias, and every tilt leaked into fake heading corrections | Measured the real field direction from flight data vs. ground truth: `(0.450, 0.020, 0.893)` |
+| Orientation uncertainty set to grow far too fast each step | About a billion times Gazebo's real gyro noise, so the filter barely trusted its own orientation, and a single GPS update could rotate it by tens of degrees | Lowered from 0.01 to 1e-7 in live mode |
+| Accelerometer used to find "down" during flight | On a hovering drone the accelerometer feels thrust, which always points straight up through the drone's body, so it pulled the estimate toward level even while the drone was tilted. Thrust is ≈ 1g in a hover, so the gate couldn't catch it | Off in flight. GPS velocity reveals tilt instead, since a tilted drone drifts sideways |
+| Accelerometer and magnetometer biases allowed to wander too freely | Real errors got absorbed into the biases: an injected 10° heading error got stuck at 6.7° inside the magnetometer bias, and tilt leaked into the accelerometer bias (which wandered to -3 m/s²) | Held near their calibrated values in flight |
+| GPS gate lockout | After one hard event (touching the ground), every GPS reading was rejected forever, and the altitude estimate ran away to -115 m | Reset position and velocity to GPS after 5 rejections in a row |
 
-Attitude error on a replay of the flight that crashed (first 12s, same recorded sensor data each time — see `testing/replay_ekf.py` below):
+To measure the estimator fixes, I replayed the sensor data from the flight that crashed through the EKF (the first 12 s, identical data every run; see [Offline replay](#offline-replay-testingreplay_ekfpy) below) and compared its orientation error against ground truth:
 
 | EKF config | Roll RMS | Pitch RMS | Yaw RMS |
 |---|---|---|---|
-| Correct mag reference, accel correction on, loose bias noise | 16.9° | 8.1° | 12.2° |
-| + bias noise pinned | 4.7° | 1.5° | 9.0° |
-| + accel gravity correction off | **0.14°** | **0.12°** | **0.20°** |
+| Correct compass field, accelerometer finds "down" in flight, biases free to wander | 16.9° | 8.1° | 12.2° |
+| + biases held near calibration | 4.7° | 1.5° | 9.0° |
+| + accelerometer no longer used to find "down" in flight | **0.14°** | **0.12°** | **0.20°** |
 
-One lesson worth keeping: the magnetometer was first "fixed" by copying PX4's remap for Gazebo's supposedly left-handed mag frame. Checked against ground truth under rotation, that made estimated yaw turn *opposite* to true yaw — the raw reading was already correct, only the reference vector was wrong. Frame claims get verified against truth now, not taken from comments.
+One lesson worth keeping: I first "fixed" the compass by copying a remap from PX4's code, meant for Gazebo's supposedly left-handed magnetometer. When I checked it against ground truth while rotating, the estimated heading turned the *opposite* way from the real heading. The raw reading had been right all along; only the assumed field direction was wrong. Now I check claims about axes and frames against ground truth instead of trusting comments.
 
-Two controller fixes, confirmed in oracle mode: altitude gains re-derived from the actual thrust sensitivity (0.026 m/s² per rad/s of motor trim — the old `vel_z` loop was slower than the `pos_z` loop wrapped around it, giving a 0↔4 m oscillation every ~6s), and the attitude D-term moved onto the gyro rate so tilt-setpoint changes no longer cause derivative kicks.
+### Controller fixes
 
-**Result: 3/3 fresh 60s flights on the EKF held true roll/pitch at 0.0°, altitude at 2.00 ± 0.01 m, and horizontal position within a few cm, with position hold on.**
+Two controller fixes, both confirmed in oracle mode:
+
+- **Altitude bobbing.** Altitude is controlled by two loops: an outer one that turns height error into a target climb speed, and an inner one that turns climb speed into throttle. The inner loop has to react faster than the outer one, but mine was slower, so the drone bobbed between 0 and 4 m every ~6 s. I recalculated the gains from how much lift each bit of extra motor speed actually produces (0.026 m/s² per rad/s).
+- **Derivative kick.** The D term reacts to how fast the error is changing. When the target tilt jumped, the error jumped with it, so the D term gave the motors a sudden kick. Now it uses the gyro's measured rotation rate instead, which only changes when the drone actually moves.
+
+**Result: 3/3 fresh 60 s flights on the EKF held true roll and pitch at 0.0°, altitude at 2.00 ± 0.01 m, and horizontal position within a few cm, with position hold on.**
+
+## What's next: battery-aware return-to-home
+
+Everything above answers "where is the drone, and which way is it pointing?" The next step is answering "how much flight does it have left?"
+
+The plan is to estimate the battery's state of charge the same way this EKF estimates position: from noisy measurements (voltage and current), with an honest measure of uncertainty. Battery voltage sags under load and recovers at rest, so the raw voltage alone isn't a reliable fuel gauge. Combined with the position estimate, the drone can then ask not just "how far is home?" but "how confident am I that I'll make it there?", and turn back early when that confidence drops.
+
+The Gazebo simulation doesn't model battery sag yet, so that's part of the work too.
 
 ## File structure
 
@@ -190,17 +241,25 @@ PID/
   pid.py                    PID class (anti-windup, filtered derivative-on-measurement)
   gz_bridge.py              Gazebo <-> Python: sensor topics in, motor speeds out, ground truth for logging
 state estimation/
-  FINAL_gps.py              the EKF in use: 18-state quaternion MEKF (attitude, gyro bias, velocity,
-                            position, accel bias, mag bias) - the evolved gps.py from the sections above
+  FINAL_gps.py              the EKF in use: 19-state quaternion MEKF (attitude, gyro bias, velocity,
+                            position, accel bias, mag bias, baro bias) - the evolved gps.py from the sections above
   calibration.py            pre-flight calibration filter that seeds FINAL_gps.py
-  complementary.py, ekf_angle_based.py, ekf_gyro_bias.py, ekf.py, quaternarions.py
+  complementary.py, ekf_angle_based.py, ekf_gyro_bias.py, ekf.py, quaternions.py
                             the earlier filters from the progression above, kept for comparison
   testing/                  offline EKF tests + the graphs in this README (test_*.py, plot_*.py, *.png)
 testing/                    Gazebo test harnesses + the replay tool
 HANDOFF.md                  running engineering log: every bug, theory, and result, in detail
 ```
 
-### Running it (needs WSL + PX4/Gazebo, see `HANDOFF.md`)
+## Requirements
+
+- **Offline tests and replay** (everything in `state estimation/` and `testing/replay_ekf.py`): Python 3 with `numpy` and `matplotlib`. No simulator needed.
+- **Live flights in Gazebo**: Linux or WSL with [PX4-Autopilot](https://github.com/PX4/PX4-Autopilot) built for SITL and Gazebo Harmonic, which provides the `gz.transport13` and `gz.msgs10` Python bindings that `PID/gz_bridge.py` uses.
+- **Optional**: `pyulog` (`testing/ulog_to_csv.py`) and `pymavlink` (`PID/px4_bridge.py`).
+
+## Running it
+
+`HANDOFF.md` is my running engineering log, with more detail on setup and every bug along the way.
 
 Start Gazebo with `make px4_sitl gz_x500` in `~/PX4-Autopilot`, kill only the PX4 process (`pkill -9 -f bin/px4`) so the motor topic is free, then:
 
@@ -215,6 +274,6 @@ Start Gazebo with `make px4_sitl gz_x500` in `~/PX4-Autopilot`, kill only the PX
 
 The loop harnesses exist for inside-out tuning — the standard flight-controller practice of getting the rate loop right before trusting attitude, and attitude before velocity/position. They share takeoff/reset code in `testing/test_common.py` and write their logs into `testing/`.
 
-### Offline replay (`testing/replay_ekf.py`)
+## Offline replay (`testing/replay_ekf.py`)
 
 `python testing/replay_ekf.py flight.csv` feeds a recorded flight back through `DroneEKF` exactly as if it were live, then reports the estimate's error against Gazebo's ground truth. No Gazebo needed, ~3 seconds per run, identical data every time, so two EKF versions can be compared fairly — that's how the estimator bugs above were found. Knobs: `T_END=12` scores only the first N seconds; `EXP="QATT=1e-6 R_ACC=5 ROLL0=5 ..."` overrides noise settings or injects a known attitude error without editing the EKF (full list in the file). Add `MAG_REMAPPED=0` for recordings made after 2026-09-30.

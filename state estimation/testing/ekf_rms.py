@@ -172,7 +172,7 @@ def run_trial(bias_x, bias_y, bias_z, num_steps=2000, dt=0.01, seed=0):
     H_raw = np.zeros((6, 6))
     I_raw = np.eye(6)
 
-    #--- Filter D: quaternion MEKF (quaternarions.py's design - quaternion attitude,
+    #--- Filter D: quaternion MEKF (quaternions.py's design - quaternion attitude,
     #    raw accel/mag vectors, gyro-bias state, multiplicative error-state correction).
     #    Same Q/R as Filter B so the comparison isolates attitude parameterization
     #    (quaternion vs. Euler), not a difference in tuning.

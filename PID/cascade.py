@@ -227,7 +227,7 @@ class Cascade:
 
 
 def yaw_from_quat(q):
-    # q = [w, x, y, z], same convention as FINAL_gps.py / quaternarions.py
+    # q = [w, x, y, z], same convention as FINAL_gps.py / quaternions.py
     w, x, y, z = q
     return np.arctan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))
 
