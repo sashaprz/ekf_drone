@@ -58,7 +58,7 @@ All three filters run against identical trajectory + sensor stream (same RNG see
 | 10x larger | EKF, no bias state | 0.681° | 0.521° | 0.268° |
 | 10x larger | EKF + bias state | 0.449° | 0.308° | 0.229° |
 
-Complementary is already visibly worse at original bias (fixed weight, no computed gain), and falls apart at 10x bias (roll RMS 9.6°) while both EKFs do way better, since they're actively canceling the bias rather than just tolerating it.
+Complementary is already visibly worse at original bias (fixed weight, no computed gain), and falls apart at 10x bias (roll RMS 9.6°) while both EKFs do way better. The EKF with a bias state barely moves at all, since it's actively canceling the bias rather than just tolerating it.
 
 ### 2. Quaternion attitude (MEKF) instead of Euler angles (`quaternarions.py`)
 
