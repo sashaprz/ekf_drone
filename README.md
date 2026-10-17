@@ -8,7 +8,7 @@ The end goal is battery state-of-charge (SOC) estimation that lets the drone mak
 
 *Caveat: SOC estimation itself isn't built yet. This repo is the foundation for it.*
 
-I built a state estimator (EKF) and a flight controller (PID) from scratch to learn them properly, and I'm applying them to SOC-aware return-to-home. These are the two core pieces an autopilot like PX4 normally gives you as a black box:
+I built a state estimator (EKF) and a flight controller (PID) from scratch, and I'm applying them to SOC-aware return-to-home. These are the two core pieces an autopilot like PX4 normally gives you as a black box:
 
 1. **State estimation**: an EKF that turns raw gyro, accelerometer, magnetometer, GPS and barometer readings into an estimate of the drone's orientation, velocity and position.
 2. **Control**: a cascaded PID controller (position → velocity → attitude → rate → motors) that flies the drone (in simulation) using that estimate.
@@ -23,7 +23,7 @@ Left: with a gyro bias 10x larger than normal, the EKF's orientation error is 17
 
 ## The estimator: design decisions and test results
 
-The estimator takes readings from five sensors (gyroscope, accelerometer, magnetometer, GPS and barometer) and blends them into one best guess of which way the drone is pointing, how fast it's moving and where it is. Along the way it learns how far off each sensor is (its bias) and subtracts that out, and it throws away any reading too far from what it expected to be real.
+The estimator takes readings from five sensors (gyroscope, accelerometer, magnetometer, GPS and barometer) and blends them into one best guess of which way the drone is pointing, how fast it's moving and where it is. It uses past data to learn how far off each sensor is (its bias) and subtracts that out, and it throws away any reading too far from what it expected to be real.
 
 Below I explain why it's built this way. I ran a bunch of tests on simulated data to determine which features were worth adding. The hard part about estimating the drone's orientation and position is that my sensors are noisy & biased, due to manufacturing imperfections and chassis jitter and electromagnetic interference, etc. So a lot of work went into minimizing the sensor bias and noise.
 
@@ -80,7 +80,7 @@ I switched the attitude state from Euler angles to a quaternion, which turns thi
 
 The accelerometer is how the filter knows which way is down. When the drone is sitting still, the only thing it feels is gravity, so it points straight at the ground and tells you exactly how tilted you are. But the moment the drone speeds up, slows down or turns, the accelerometer feels that too, and it can't tell the difference. To the accelerometer, "accelerating forward" looks the same as "tilted backward".
 
-So the filter trusts the accelerometer less whenever it's clearly feeling more than just gravity. If the total reading is far from 1g, something other than gravity is going on, and the filter turns down how much it listens.
+So the filter trusts the accelerometer less whenever it's clearly feeling more than just gravity. If the total reading is far from 1g, something other than gravity is going on (ie the drone is accelerating), and the filter trusts that measurement less.
 
 Some readings are so far off they can't be real at all, like a glitch or a hard bump. Those get thrown out completely. The tricky part is deciding what counts as "too far off". A fixed limit ("reject anything more than X away from what I expected") doesn't work, because how surprising a reading is depends on how sure the filter is. Right after startup the filter barely knows anything, so big differences between what it expected and what it got are normal. After a long, clean flight, the same difference would be suspicious.
 
@@ -125,7 +125,7 @@ With GPS, position error dropped 8-10x in every scenario. I also reran each scen
 
 ### 5. Gate every sensor, not just the accelerometer (`gps.py`, `test_gates.py`)
 
-The accelerometer isn't the only sensor that lies. GPS signals can bounce off buildings before reaching the drone (multipath), making it look like the drone jumped tens of meters. The magnetometer, which works like a compass, gets thrown off by anything magnetic nearby, like motors, power lines or steel. So every sensor gets the same kind of gate as the accelerometer. If a reading fails its gate, the filter skips it entirely for that step, rather than using part of it.
+The accelerometer isn't the only sensor that can lie. GPS signals can bounce off buildings before reaching the drone (multipath), making it look like the drone jumped tens of meters. The magnetometer, which works like a compass, gets thrown off by anything magnetic nearby, like motors (which are definitely nearby), power lines or steel. So every sensor gets the same kind of gate as the accelerometer. If a reading fails its gate, the filter skips it entirely for that step, rather than using part of it.
 
 #### Test: a fake 50 m GPS jump and a 90°-wrong compass reading, gates on vs. off
 
@@ -145,9 +145,9 @@ Gating also exposed a second problem. Every step, the filter can get corrections
 
 The gyro isn't the only sensor with a built-in offset. The accelerometer and magnetometer have them too, and left alone they show up as fake tilt and fake heading error. So, like the gyro, each one gets a bias that the filter learns and subtracts.
 
-There's a catch, though. With the drone sitting still, an accelerometer bias looks exactly like the drone being slightly tilted. Both just mean "gravity reads a little off from straight down", and there's no way to tell which one it is. Same with the magnetometer: a bias looks just like the drone pointing in a slightly different direction.
+But with the drone sitting still, an accelerometer bias looks exactly like the drone being slightly tilted. Both just mean "gravity reads a little off from straight down", and there's no way to tell which one it is. Same with the magnetometer: a bias looks just like the drone pointing in a slightly different direction.
 
-The fix is to move. A sensor's bias is stuck to the sensor, so it stays the same no matter how the drone is turned. A real tilt doesn't: it changes as the drone rotates. Once the drone moves around, the two stop looking alike. So before takeoff, the calibration routine has the drone do a small wiggle: roll and pitch to separate accelerometer bias from tilt, and yaw to separate magnetometer bias from heading.
+So we have a calibration routine, which can separate these biases out. A sensor's bias is stuck to the sensor, so it stays the same no matter how the drone is turned. A real tilt doesn't: it changes as the drone rotates. Once the drone moves around, the two stop looking alike.
 
 Under a rotating test trajectory, both biases settle onto their true values (the magnetometer bias to within ~0.0004 of the true value):
 
@@ -165,7 +165,7 @@ The controller is a chain of loops, each one feeding the next: where should I be
 
 For a long time, the drone flipped over within 4-6 seconds of switching on position hold. It looked like the controller was oscillating. To check, I added an **oracle mode**, where the controller flies on Gazebo's ground truth (the drone's true position and orientation) instead of the EKF. On ground truth, with exactly the same controller settings, it hovered perfectly level. So the controller was fine, and the EKF was feeding it the wrong state.
 
-Every bug turned out to be in how Gazebo's data met the EKF. The two most interesting:
+Turns out all the bugs were in my EKF's interface with Gazebo. The two most interesting:
 
 - **In flight, the accelerometer feels thrust, not gravity.** On a hovering drone, thrust always points straight up through the drone's body, so using the accelerometer to find "down" pulled the estimate toward level even while the drone was tilted. Thrust is ≈ 1g in a hover, so the gate couldn't catch it. That correction is now off in flight, and GPS velocity reveals tilt instead, since a tilted drone drifts sideways.
 - **The compass assumed Earth's magnetic field is horizontal.** Gazebo's field points steeply into the ground, like the real one at most latitudes. Calibration hid the mismatch as a fake bias, and every tilt leaked into fake heading corrections. My first "fix" copied a remap from PX4's code, which made the estimated heading turn the *opposite* way from the real one. The real fix was measuring the field's actual direction from flight data against ground truth. Lesson learned: check claims about axes against ground truth instead of trusting comments.
@@ -185,7 +185,7 @@ Two controller fixes, both confirmed in oracle mode:
 
 Everything above answers "where is the drone, and which way is it pointing?" The next step is answering "how much flight does it have left?"
 
-The plan is to estimate the battery's state of charge the same way this EKF estimates position: from noisy measurements (voltage and current), with an honest measure of uncertainty. Battery voltage sags under load and recovers at rest, so the raw voltage alone isn't a reliable fuel gauge. Combined with the position estimate, the drone can then ask not just "how far is home?" but "how confident am I that I'll make it there?", and turn back early when that confidence drops.
+I plan to estimate the battery's state of charge the same way this EKF estimates position. From noisy measurements (voltage and current), with an honest measure of uncertainty. Battery voltage sags under load and recovers at rest, so the raw voltage alone isn't a reliable fuel gauge. Combined with the position estimate, the drone can then ask not just "how far is home?" but "how confident am I that I'll make it there?", and turn back early when that confidence drops.
 
 The Gazebo simulation doesn't model battery sag yet, so that's part of the work too.
 
