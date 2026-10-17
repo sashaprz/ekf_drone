@@ -74,7 +74,9 @@ However we also need to add a constraint. A circle is a 1D object, but our descr
 
 Quaternarions are the same idea, just in higher dimensions. To describe a rotation in 3D space, we use 4 numbers, plus the constraint x^2 + y^2 + z^2 + w^2 = 1. 
 
-Switched the attitude state from Euler angles to a quaternion, which turns this into a multiplicative EKF (MEKF): a quaternion has 4 numbers for only 3 rotational degrees of freedom, so it can't be corrected by plain vector addition the way Euler angles can. Instead, the Kalman math (`P`, `K`) runs on a 3-dimensional small-angle error state, which then gets folded onto the quaternion multiplicatively and renormalized — this avoids gimbal lock (no singular orientation, unlike Euler angles) and keeps the covariance math well-posed instead of operating on a redundant, constrained state. It performed essentially identically on the RMS test (~0.445°/0.305°/0.230° vs. 0.443/0.305/0.229 for the Euler version), which is expected — same underlying model, just a numerically better-behaved state representation.
+I switched the attitude state from Euler angles to a quaternion, which turns this into a multiplicative EKF (MEKF). Instead, the Kalman math (`P`, `K`) runs on a 3-dimensional small-angle error state, which then gets folded onto the quaternion multiplicatively and renormalized.It performed essentially identically on the RMS test (~0.445°/0.305°/0.230° vs. 0.443/0.305/0.229 for the Euler version), which is expected — same underlying model, just a numerically better-behaved state representation.
+
+//add explanation of why we need to multiply instead of just adding vectors?
 
 ### 3. Distrust the accelerometer during motion, and reject impossible readings (`ekf.py`, `test_gating.py`)
 
