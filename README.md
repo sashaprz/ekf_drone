@@ -72,21 +72,21 @@ Complementary is already visibly worse at original bias (fixed weight, no comput
 
 ### 2. Quaternion attitude (MEKF) instead of Euler angles (`quaternions.py`)
 
-Standard Euler angles (roll φ, pitch θ, yaw ψ) blow up when pitch reaches ±90°. For example, the yaw rate is ψ̇ = (q·sin φ + r·cos φ) / cos θ. When cos θ = 0, this is undefined. This is called gimbal lock.
+Standard Euler angles (roll, pitch, yaw) blow up at the axes. For example, yaw = (q·sin φ + r·cos φ) / cos θ. If cos θ is 0, then this is undefined. This is called gimbal lock. 
 
-Every 3-number representation of a 3D rotation has a discontinuity somewhere. The best explanation is [3Blue1Brown's video on this topic](https://youtu.be/d4EgbgTm0Bg), but I will give a quick summary.
+Every 3-number representation of a 3D rotation has a discontinuity somewhere. The best explanation is [3Blue1Brown's video on this topic](https://youtu.be/d4EgbgTm0Bg), but I will give a quick summary. 
 
-Suppose you have a 1D rotation: a simple circle. Since this is 1D, it is effectively just a line, and you can picture cutting that circle open to make a line. You can represent position on that circle (line) with one number, θ. 0 and 2π represent the same spot in the rotation, but on the line they are very far apart. This is called a seam: a place where points that should be neighbours are no longer neighbours. Since a filter works in tiny changes, it is unnatural for it to treat 2π plus a tiny increase in angle as being next to 0.
+Suppose you have a 1D rotation - a simple circle. Since this is 1D, it is effectively just a line, and you can picture opening up that circle to create a line. You can represent position on that circle (line) with one number, θ. 0 and 2π represent the same spot in the rotation. But on the line, they are very far apart. This is called a seam. It is where points that should be neighbours, are no longer neighbours. Since a filter looks at tiny changes, it is unnatural for it to say that 2π + some tiny increase in angle is 0. 
 
-If we instead keep this 1D rotation, a circle, inside a 2D space (a plane), we remove this discontinuity. We can represent every point on the circle as x = cos θ, y = sin θ. By increasing the number of descriptors, we can describe the circle as what it actually is: a loop in a 2D plane.
+If we instead keep this 1D rotation, a circle, inside a 2D space (a plane), then we remove this discontinuity. Instead, we can represent every point on the circle as x = cos θ, y = sin θ. By increasing our number of descriptors, we can describe the circle as what it actually is: a loop in a 2D plane. 
 
-However, we also need to add a constraint. A circle is a 1D object, but our descriptors now have 2 degrees of freedom (x and y can span the whole plane, but we only want points on the circle of radius 1). So we constrain x² + y² = 1, reducing the degrees of freedom back down to 1.
+However we also need to add a constraint. A circle is a 1D object, but our descriptors currently have 2 degrees of freedom (x and y can span the whole plane, but we want to only describe the circle with radius = 1). So we constrain x² + y² = 1, reducing the degrees of freedom back down to 1. 
 
-Quaternions are the same idea, just in higher dimensions. To describe a rotation in 3D space, we use 4 numbers, plus the constraint w² + x² + y² + z² = 1.
+Quaternions are the same idea, just in higher dimensions. To describe a rotation in 3D space, we use 4 numbers, plus the constraint x² + y² + z² + w² = 1. 
 
-That constraint is also why the correction has to be multiplied in rather than added. Back on the circle: if the filter nudges (x, y) by adding a small vector, the result lands slightly off the circle, so it's no longer a valid rotation. The natural correction is to *rotate* the point by a small angle, which keeps it on the circle by construction. Quaternions work the same way: adding a correction vector to the 4 numbers breaks w² + x² + y² + z² = 1, while multiplying by a small rotation quaternion keeps it.
+That constraint is also why the correction has to be multiplied in rather than added. Back on the circle: if the filter nudges (x, y) by adding a small vector, the result lands slightly off the circle, so it's no longer a valid rotation. The natural correction is to *rotate* the point by a small angle, which keeps it on the circle by construction. Quaternions work the same way: adding a correction vector to the 4 numbers breaks x² + y² + z² + w² = 1, while multiplying by a small rotation quaternion keeps it.
 
-I switched the attitude state from Euler angles to a quaternion, which turns this into a multiplicative EKF (MEKF). The Kalman math (`P`, `K`) runs on a 3-dimensional small-angle error state (the 3 real rotational degrees of freedom), which then gets folded onto the quaternion multiplicatively and renormalized. It performed essentially identically on the RMS test (~0.445°/0.305°/0.230° vs. 0.443/0.305/0.229 for the Euler version), which is expected: same underlying model, just a numerically better-behaved state representation.
+I switched the attitude state from Euler angles to a quaternion, which turns this into a multiplicative EKF (MEKF). Instead, the Kalman math (`P`, `K`) runs on a 3-dimensional small-angle error state, which then gets folded onto the quaternion multiplicatively and renormalized. It performed essentially identically on the RMS test (~0.445°/0.305°/0.230° vs. 0.443/0.305/0.229 for the Euler version), which is expected — same underlying model, just a numerically better-behaved state representation.
 
 ### 3. Trust the accelerometer less when the drone is moving, and throw out impossible readings (`ekf.py`, `test_gating.py`)
 
