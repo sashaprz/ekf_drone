@@ -1,4 +1,4 @@
-# python_drone
+# ekf_drone
 
 A from-scratch EKF and PID controller for a drone, built as the foundation for battery state-of-charge estimation and smarter return-to-home.
 
