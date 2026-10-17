@@ -60,9 +60,19 @@ All three filters run against identical trajectory + sensor stream (same RNG see
 
 Complementary is already visibly worse at original bias (fixed weight, no computed gain), and falls apart at 10x bias (roll RMS 9.6°) while both EKFs do way better, since since they're actively canceling the bias rather than just tolerating it.
 
-### 2. Quaternion attitude (MEKF), not Euler angles (`quaternarions.py`)
+### 2. Quaternion attitude (MEKF) instead of Euler angles (`quaternarions.py`)
 
-**Decision:** store attitude as a quaternion. Euler angles hit gimbal lock at some orientations; a quaternion never does. The test below shows the switch costs no accuracy.
+Standard Euler angles (roll, pitch, yaw) blow up at the axes. For example, yaw = q * sinphi + rcosphi all over cos theta. If cos theta is 0, then this is undefined. This is called gimbal lock. 
+
+Every 3-number representation of a a 3D rotation has a discontinuity somewhere. The best explanation is 3Blue1Brown's video on this topic [hyperlink this: https://youtu.be/d4EgbgTm0Bg?si=cGlBMP3Q6XgEGaKx], but I will give a quick summary. 
+
+Suppose you have a 1D rotation - a simple circle. Since this is 1D, it is effectively just a line, and you can picture opening up that circle to create a line. You can represent position on that circle (line) with one number, theta. 0 and 2pi represent the same spot in the rotation. But on the line, they are very far apart. This is called a seam. It is where points that should be neighbours, are no longer neighbours. Since a filter looks at tiny changes, it is unnatural for it to say that 2pi + some tiny increase in angle is 0. 
+
+If we instead keep this 1D rotation, a circle, inside a 2D space (a plane), then we remove this discontinuity. Instead, we can represent every point on the circle as x = costheta, y = sintheta. By increasing our number of descriptors, we can describe the circle as what it actually is: a loop in a 2D plane. 
+
+However we also need to add a constraint. A circle is a 1D object, but our descriptors currently have 2 degrees of freedom (x and y can span the whole plane, but we want to only describe the circle with radius = 1). So we constrain x^2 + y^2 = 1, reducing the degrees of freedom back down to 1. 
+
+Quaternarions are the same idea, just in higher dimensions. To describe a rotation in 3D space, we use 4 numbers, plus the constraint x^2 + y^2 + z^2 + w^2 = 1. 
 
 Switched the attitude state from Euler angles to a quaternion, which turns this into a multiplicative EKF (MEKF): a quaternion has 4 numbers for only 3 rotational degrees of freedom, so it can't be corrected by plain vector addition the way Euler angles can. Instead, the Kalman math (`P`, `K`) runs on a 3-dimensional small-angle error state, which then gets folded onto the quaternion multiplicatively and renormalized — this avoids gimbal lock (no singular orientation, unlike Euler angles) and keeps the covariance math well-posed instead of operating on a redundant, constrained state. It performed essentially identically on the RMS test (~0.445°/0.305°/0.230° vs. 0.443/0.305/0.229 for the Euler version), which is expected — same underlying model, just a numerically better-behaved state representation.
 
