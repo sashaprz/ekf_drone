@@ -88,6 +88,12 @@ def main():
     ap.add_argument("ulg")
     ap.add_argument("csv")
     ap.add_argument("--cal-samples", type=int, default=200)
+    # benchmark (testing/benchmark): a fault-injected log must not change the field estimate -
+    # pass the direction measured on the clean log instead ("x,y,z", ENU)
+    ap.add_argument("--mag-ref", default=None)
+    # PX4's replay re-logs ground truth at only ~7 Hz: take it from the original flight log
+    # (50 Hz) instead. Ground truth is interpolated onto the IMU timeline either way.
+    ap.add_argument("--truth-from", default=None)
     a = ap.parse_args()
     from pyulog import ULog
 
@@ -96,7 +102,8 @@ def main():
     mag = ds(ulog, "vehicle_magnetometer")
     gps = ds(ulog, "vehicle_gps_position") or ds(ulog, "sensor_gps")
     baro = ds(ulog, "vehicle_air_data")
-    att_gt, pos_gt = ds(ulog, "vehicle_attitude_groundtruth"), ds(ulog, "vehicle_local_position_groundtruth")
+    tlog = ULog(a.truth_from, ["vehicle_attitude_groundtruth", "vehicle_local_position_groundtruth"]) if a.truth_from else ulog
+    att_gt, pos_gt = ds(tlog, "vehicle_attitude_groundtruth"), ds(tlog, "vehicle_local_position_groundtruth")
     att_ekf, pos_ekf = ds(ulog, "vehicle_attitude"), ds(ulog, "vehicle_local_position")
     if imu is None or mag is None or gps is None:
         sys.exit("log lacks sensor_combined / vehicle_magnetometer / vehicle_gps_position - see SDLOG_PROFILE above")
@@ -144,22 +151,34 @@ def main():
         bt = bh = np.full(len(t), np.nan)
 
     # reference attitude/position: groundtruth if logged (SITL), else PX4's estimate
-    def att_pos(att, pos):
+    def att_pos(att, pos, interp=False):
+        # interp=True (ground truth, logged at ~50 Hz): linear / nlerp between samples, so the
+        # reference doesn't lag up to one logging interval behind the 250 Hz estimates.
+        # interp=False (PX4's estimate, logged at the IMU rate): zero-order hold, as before.
         ta = att["timestamp"] * 1e-6
         q_ned = vec(att, "q", 4)
-        qa, ia = hold(ta, q_ned, t)
+        if interp:
+            q_ned = q_ned.copy()
+            for k in range(1, len(q_ned)):  # same hemisphere for interpolation
+                if q_ned[k] @ q_ned[k - 1] < 0:
+                    q_ned[k] = -q_ned[k]
+            qa = np.stack([np.interp(t, ta, q_ned[:, j]) for j in range(4)], axis=1)
+            qa /= np.linalg.norm(qa, axis=1, keepdims=True)
+            stamp = t.copy()
+        else:
+            qa, ia = hold(ta, q_ned, t)
+            stamp = ta[ia]
         q = np.array([q_ned_frd_to_enu_flu(x) for x in qa])
         tp_ = pos["timestamp"] * 1e-6
-        p_ned = np.stack([pos["x"], pos["y"], pos["z"]], axis=1)
-        pp, ip = hold(tp_, p_ned, t)
-        p = pp @ T_NED2ENU.T
+        rd = (lambda arr: np.stack([np.interp(t, tp_, arr[:, j]) for j in range(arr.shape[1])], axis=1)) if interp \
+            else (lambda arr: hold(tp_, arr, t)[0])
+        p = rd(np.stack([pos["x"], pos["y"], pos["z"]], axis=1)) @ T_NED2ENU.T
         v = None
         if "vx" in pos:
-            vv, _ = hold(tp_, np.stack([pos["vx"], pos["vy"], pos["vz"]], axis=1), t)
-            v = vv @ T_NED2ENU.T
-        return q, p, v, ta[ia]
+            v = rd(np.stack([pos["vx"], pos["vy"], pos["vz"]], axis=1)) @ T_NED2ENU.T
+        return q, p, v, stamp
     truth_src = "groundtruth" if (att_gt is not None and pos_gt is not None) else "px4_ekf2"
-    tq, tpos, _, tt = att_pos(att_gt, pos_gt) if truth_src == "groundtruth" else att_pos(att_ekf, pos_ekf)
+    tq, tpos, tvel, tt = att_pos(att_gt, pos_gt, interp=True) if truth_src == "groundtruth" else att_pos(att_ekf, pos_ekf)
     eq, epos, evel, _ = att_pos(att_ekf, pos_ekf)
 
     # mag reference: the earth-field direction in ENU, measured like MAG_REFERENCE_ENU was
@@ -167,6 +186,9 @@ def main():
     w = np.array([quat_to_R(q) @ mm for q, mm in zip(tq[flight][::10], m[flight][::10])])
     mag_ref = w.mean(0)
     mag_ref = mag_ref / np.linalg.norm(mag_ref)
+    if a.mag_ref:
+        mag_ref = np.array([float(x) for x in a.mag_ref.split(",")])
+        mag_ref = mag_ref / np.linalg.norm(mag_ref)
     spread = float(np.degrees(np.arccos(np.clip(w @ mag_ref / np.linalg.norm(w, axis=1), -1, 1))).std())
 
     params = ulog.initial_parameters
@@ -175,13 +197,17 @@ def main():
     os.makedirs(os.path.dirname(os.path.abspath(a.csv)), exist_ok=True)
     cols = ["t", "gx", "gy", "gz", "ax", "ay", "az", "mx", "my", "mz", "px", "py", "pz", "vx", "vy", "vz",
             "tqw", "tqx", "tqy", "tqz", "tpx", "tpy", "tpz", "mt", "spx", "spy", "spz", "spyaw",
-            "eqw", "eqx", "eqy", "eqz", "epx", "epy", "epz", "evx", "evy", "evz", "tw", "tt", "bt", "bh", "mgt", "gpt"]
+            "eqw", "eqx", "eqy", "eqz", "epx", "epy", "epz", "evx", "evy", "evz", "tw", "tt", "bt", "bh", "mgt", "gpt",
+            "tvx", "tvy", "tvz"]
     f0 = flight.start
     n = len(t) - f0
     z = np.zeros(n)
     evel = evel if evel is not None else np.zeros((len(t), 3))
+    # reference velocity as logged (testing/benchmark scores velocity against it; differencing
+    # the held pose breaks on replayed logs' repeated stamps)
+    tvel = tvel if tvel is not None else np.full((len(t), 3), np.nan)
     data = np.column_stack([t[f0:], gyro[f0:], accel[f0:], m[f0:], g_rows[f0:], tq[f0:], tpos[f0:],
-                            t[f0:] - t[f0], z, z, z, z, eq[f0:], epos[f0:], evel[f0:], t[f0:], tt[f0:], bt[f0:], bh[f0:], mgt[f0:], gpt[f0:]])
+                            t[f0:] - t[f0], z, z, z, z, eq[f0:], epos[f0:], evel[f0:], t[f0:], tt[f0:], bt[f0:], bh[f0:], mgt[f0:], gpt[f0:], tvel[f0:]])
     np.savetxt(a.csv, data, delimiter=",", header=",".join(cols), comments="", fmt="%.6f")
     with open(a.csv + ".cal.csv", "w") as fcal:
         fcal.write("gx,gy,gz,mx,my,mz,ax,ay,az\n")
@@ -189,6 +215,7 @@ def main():
             fcal.write(",".join(f"{v:.6f}" for v in (*gyro[k], *m[k], *accel[k])) + "\n")
     meta = {"source": os.path.basename(a.ulg), "truth": truth_src, "gps_latency_s": gps_delay_ms / 1000.0,
             "mag_reference": [round(float(x), 4) for x in mag_ref], "mag_reference_spread_deg": round(spread, 2),
+            "mag_declination_deg": round(math.degrees(math.atan2(mag_ref[0], mag_ref[1])), 3),
             "mag_scale_gauss": mag_scale, "cal_window_s": [float(t[cal.start] - t[0]), float(t[cal.stop - 1] - t[0])],
             "imu_hz": float(1.0 / np.median(np.diff(t))), "mag_hz": float(1.0 / np.median(np.diff(tm))),
             "gps_hz": float(1.0 / np.median(np.diff(tg))),
