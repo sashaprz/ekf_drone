@@ -24,6 +24,18 @@ Field alignment (--align-field DECL,INCL, applied before any fault, for every co
   Gazebo's field direction onto the WMM direction, and rotated back - so the true field
   becomes the one EKF2 assumes, and the other filters measure that same field from the log.
 
+Gazebo magnetometer fix (--fix-gz-mag, applied first): gz-sim's magnetometer plugin works in
+a left-handed frame (gz-sim PR #2460): its earth field puts magnetic north on the world x
+axis, which in Gazebo's ENU world is EAST. PX4's bridge (GZBridge::magnetometerCallback)
+compensates by swapping body axes, (-y, -x, z), which makes a level vehicle read the right
+heading but is a 90 deg body-yaw rotation of the sensor - wrong as soon as it tilts (the
+logged field is ~35 deg off the true attitude at 15-30 deg tilt; EKF2 rejects it then, mag
+test ratio > 1). Fitted against ground truth over all 48 signed axis permutations, exactly
+one makes the field constant in the world frame (~1 deg residual at any tilt):
+    fixed_FRD = (m_y, -m_x, m_z)
+It leaves a correctly attached sensor in a field pointing ~east; --align-field then rotates
+that field onto the WMM direction like before.
+
 GPS timing (--gps-arrival-stamp, also before any fault): PX4 stamps every fix
 timestamp_sample = arrival - SENS_GPS0_DELAY (110 ms default) and EKF2 fuses it at that
 time, but Gazebo's GPS has no real latency - against ground truth the velocity lines up with
@@ -175,6 +187,14 @@ def align_field(u, decl_deg, incl_deg):
     return math.degrees(math.acos(np.clip(gz_dir @ wmm_dir, -1, 1)))
 
 
+def fix_gz_mag(u):
+    """Undo PX4's level-only axis swap of the gz-sim magnetometer (see the module docstring)."""
+    pos, _ = u.read("vehicle_magnetometer", "timestamp")
+    _, m = u.read("vehicle_magnetometer", "magnetometer_ga")
+    u.write("vehicle_magnetometer", "magnetometer_ga", pos, np.stack([m[:, 1], -m[:, 0], m[:, 2]], 1))
+    return len(pos)
+
+
 def gps_arrival_stamp(u):
     n = 0
     for topic in ("vehicle_gps_position", "sensor_gps"):
@@ -276,15 +296,18 @@ def main():
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--align-field", default=None, help="DECL_DEG,INCL_DEG of the WMM field EKF2 uses")
     ap.add_argument("--gps-arrival-stamp", action="store_true")
+    ap.add_argument("--fix-gz-mag", action="store_true")
     a = ap.parse_args()
     u = ULogPatch(open(a.inp, "rb").read())
     rot = None
+    mag_fixed = fix_gz_mag(u) if a.fix_gz_mag else 0
     if a.align_field:
         rot = align_field(u, *(float(x) for x in a.align_field.split(",")))
     restamped = gps_arrival_stamp(u) if a.gps_arrival_stamp else 0
     info = apply(u, a.fault, a.seed)
     info["field_rotated_deg"] = rot
     info["gps_restamped"] = restamped
+    info["gz_mag_fixed"] = mag_fixed
     open(a.out, "wb").write(u.b)
     import json
     print(json.dumps(info))

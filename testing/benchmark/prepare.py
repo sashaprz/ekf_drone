@@ -69,6 +69,47 @@ def ekf2_replay(ulg):
     return max(new, key=os.path.getmtime)
 
 
+def prepare_flight(ulg, a):
+    name = os.path.splitext(os.path.basename(ulg))[0]
+    # the WMM field EKF2 uses here: the declination it saved (EKF2_MAG_DECL, EKF2_DECL_TYPE
+    # bit 1) and the inclination reference it logs; Gazebo's field is rotated onto it
+    from pyulog import ULog
+    lg = ULog(ulg, ["estimator_status"])
+    decl = lg.initial_parameters["EKF2_MAG_DECL"]
+    inc = lg.data_list[0].data["mag_inclination_ref_deg"]
+    incl = float(np.nanmedian(inc[np.isfinite(inc) & (inc != 0)]))
+    aligned = os.path.join(WORK, name + "__aligned.ulg")
+    run([sys.executable, os.path.join(R, "testing", "benchmark", "ulog_faults.py"), ulg, aligned, "none",
+         f"--align-field={decl},{incl}", "--gps-arrival-stamp", "--fix-gz-mag"])
+    # field direction of the aligned clean log, measured against ground truth (ulog_to_csv's
+    # estimate) - every fault variant's csv gets this, so a mag fault can't leak into it
+    clean_csv = os.path.join(WORK, name + "__clean.csv")
+    run([sys.executable, os.path.join(R, "testing", "ulog_to_csv.py"), aligned, clean_csv, "--cal-samples", str(CAL_SAMPLES), "--gps-latency", "0"])
+    meta = json.load(open(clean_csv + ".meta.json"))
+    ref = ",".join(str(x) for x in meta["mag_reference"])
+    for fault in a.faults.split(","):
+        out_csv = os.path.join(OUT, f"{name}__{fault}.csv")
+        if os.path.exists(out_csv + ".meta.json"):
+            print(f"skip {out_csv} (done)", flush=True)
+            continue
+        t0 = time.time()
+        patched = os.path.join(WORK, f"{name}__{fault}.ulg")
+        info = json.loads(run([sys.executable, os.path.join(R, "testing", "benchmark", "ulog_faults.py"),
+                               ulg, patched, fault, "--seed", str(zlib.crc32(name.encode()) % 10000),
+                               f"--align-field={decl},{incl}", "--gps-arrival-stamp", "--fix-gz-mag"]))
+        replayed = ekf2_replay(patched)
+        run([sys.executable, os.path.join(R, "testing", "ulog_to_csv.py"), replayed, out_csv,
+             "--cal-samples", str(CAL_SAMPLES), f"--mag-ref={ref}", f"--truth-from={ulg}",
+             "--gps-latency", "0"])
+        m = json.load(open(out_csv + ".meta.json"))
+        m.update(flight=name, fault=fault, fault_info=info, ekf2_source="replay", wmm_decl_deg=decl, wmm_incl_deg=incl)
+        json.dump(m, open(out_csv + ".meta.json", "w"), indent=1)
+        os.remove(patched)
+        os.remove(replayed)
+        print(f"PREPARED {name} {fault} in {time.time() - t0:.0f}s", flush=True)
+
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("ulg", nargs="+")
@@ -76,45 +117,15 @@ def main():
     a = ap.parse_args()
     os.makedirs(WORK, exist_ok=True)
     os.makedirs(OUT, exist_ok=True)
+    failed = []
     for ulg in a.ulg:
-        name = os.path.splitext(os.path.basename(ulg))[0]
-        # the WMM field EKF2 uses here: the declination it saved (EKF2_MAG_DECL, EKF2_DECL_TYPE
-        # bit 1) and the inclination reference it logs; Gazebo's field is rotated onto it
-        from pyulog import ULog
-        lg = ULog(ulg, ["estimator_status"])
-        decl = lg.initial_parameters["EKF2_MAG_DECL"]
-        inc = lg.data_list[0].data["mag_inclination_ref_deg"]
-        incl = float(np.nanmedian(inc[np.isfinite(inc) & (inc != 0)]))
-        aligned = os.path.join(WORK, name + "__aligned.ulg")
-        run([sys.executable, os.path.join(R, "testing", "benchmark", "ulog_faults.py"), ulg, aligned, "none",
-             f"--align-field={decl},{incl}", "--gps-arrival-stamp"])
-        # field direction of the aligned clean log, measured against ground truth (ulog_to_csv's
-        # estimate) - every fault variant's csv gets this, so a mag fault can't leak into it
-        clean_csv = os.path.join(WORK, name + "__clean.csv")
-        run([sys.executable, os.path.join(R, "testing", "ulog_to_csv.py"), aligned, clean_csv, "--cal-samples", str(CAL_SAMPLES), "--gps-latency", "0"])
-        meta = json.load(open(clean_csv + ".meta.json"))
-        ref = ",".join(str(x) for x in meta["mag_reference"])
-        for fault in a.faults.split(","):
-            out_csv = os.path.join(OUT, f"{name}__{fault}.csv")
-            if os.path.exists(out_csv + ".meta.json"):
-                print(f"skip {out_csv} (done)", flush=True)
-                continue
-            t0 = time.time()
-            patched = os.path.join(WORK, f"{name}__{fault}.ulg")
-            info = json.loads(run([sys.executable, os.path.join(R, "testing", "benchmark", "ulog_faults.py"),
-                                   ulg, patched, fault, "--seed", str(zlib.crc32(name.encode()) % 10000),
-                                   f"--align-field={decl},{incl}", "--gps-arrival-stamp"]))
-            replayed = ekf2_replay(patched)
-            run([sys.executable, os.path.join(R, "testing", "ulog_to_csv.py"), replayed, out_csv,
-                 "--cal-samples", str(CAL_SAMPLES), f"--mag-ref={ref}", f"--truth-from={ulg}",
-                 "--gps-latency", "0"])
-            m = json.load(open(out_csv + ".meta.json"))
-            m.update(flight=name, fault=fault, fault_info=info, ekf2_source="replay", wmm_decl_deg=decl, wmm_incl_deg=incl)
-            json.dump(m, open(out_csv + ".meta.json", "w"), indent=1)
-            os.remove(patched)
-            os.remove(replayed)
-            print(f"PREPARED {name} {fault} in {time.time() - t0:.0f}s", flush=True)
-
+        # one bad flight must not stop the batch: it's reported, the rest still get prepared
+        try:
+            prepare_flight(ulg, a)
+        except Exception as e:
+            failed.append(os.path.basename(ulg))
+            print(f"FAILED {os.path.basename(ulg)}: {type(e).__name__}: {str(e)[-600:]}", flush=True)
+    print(f"prepare done, {len(failed)} flight(s) failed: {failed}", flush=True)
 
 if __name__ == "__main__":
     main()

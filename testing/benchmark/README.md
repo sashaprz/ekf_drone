@@ -65,3 +65,11 @@ gps_outliers, mag_bias, mag_interference, imu_spikes.
   because it also told your EKF to delay it by another 110 ms. A timing error during a turn
   looks exactly like a heading error. `ulog_faults.py --gps-arrival-stamp` and
   `ulog_to_csv.py --gps-latency 0` fix it for both filters.
+- **The SITL magnetometer is wrong whenever the vehicle tilts.** gz-sim's mag plugin uses a
+  left-handed frame (gz-sim PR #2460). PX4's bridge swaps axes to compensate, which is
+  correct only when level. At 15–30° tilt the logged field is about 35° off the true
+  attitude. EKF2 rejects it then, with a mag test ratio above 1. The other filters fuse the
+  bad readings or gate them out. `ulog_faults.py --fix-gz-mag` applies `(m_y, −m_x, m_z)`
+  in FRD. This was the only one of 48 signed axis permutations that is consistent with
+  ground truth, at about 1–3° residual at any tilt. Without the fix, declination learning
+  learned the bug instead of the field.

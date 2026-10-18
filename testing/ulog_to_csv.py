@@ -127,6 +127,17 @@ def main():
     run = np.convolve(rest.astype(int), np.ones(a.cal_samples, int), "valid")
     starts = np.flatnonzero(run == a.cal_samples)
     if len(starts) == 0:
+        # a large turn-on gyro bias (or accel bias) fails the absolute test even when the vehicle
+        # is perfectly still - test the deviation from a 1 s moving mean instead (a constant
+        # bias isn't motion). Fallback only, so logs that passed before convert identically.
+        k = np.ones(250) / 250
+
+        def dev(x):
+            return x - np.stack([np.convolve(x[:, j], k, "same") for j in range(3)], axis=1)
+        rest = (np.linalg.norm(dev(gyro), axis=1) < 0.03) & (np.linalg.norm(dev(accel), axis=1) < 0.3)
+        run = np.convolve(rest.astype(int), np.ones(a.cal_samples, int), "valid")
+        starts = np.flatnonzero(run == a.cal_samples)
+    if len(starts) == 0:
         sys.exit("no at-rest stretch found for calibration - log from boot (SDLOG_MODE=1)")
     c0 = starts[0]
     cal = slice(c0, c0 + a.cal_samples)
