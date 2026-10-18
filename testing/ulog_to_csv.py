@@ -123,7 +123,11 @@ def main():
     mgt = tm[mi]  # each row's mag-reading stamp - the EKF fuses each reading once
 
     # calibration dwell: first run of cal-samples IMU samples at rest (before arming)
-    rest = (np.linalg.norm(gyro, axis=1) < 0.03) & (np.abs(np.linalg.norm(accel, axis=1) - 9.80665) < 0.3)
+    # a calm hover passes these tests too, so only look before the first takeoff-sized
+    # rotation (> 0.3 rad/s) - the dwell is always before that
+    moved = np.flatnonzero(np.linalg.norm(gyro, axis=1) > 0.3)
+    before = np.arange(len(t)) < (moved[0] if len(moved) else len(t))
+    rest = (np.linalg.norm(gyro, axis=1) < 0.03) & (np.abs(np.linalg.norm(accel, axis=1) - 9.80665) < 0.3) & before
     run = np.convolve(rest.astype(int), np.ones(a.cal_samples, int), "valid")
     starts = np.flatnonzero(run == a.cal_samples)
     if len(starts) == 0:
@@ -134,7 +138,7 @@ def main():
 
         def dev(x):
             return x - np.stack([np.convolve(x[:, j], k, "same") for j in range(3)], axis=1)
-        rest = (np.linalg.norm(dev(gyro), axis=1) < 0.03) & (np.linalg.norm(dev(accel), axis=1) < 0.3)
+        rest = (np.linalg.norm(dev(gyro), axis=1) < 0.03) & (np.linalg.norm(dev(accel), axis=1) < 0.3) & before
         run = np.convolve(rest.astype(int), np.ones(a.cal_samples, int), "valid")
         starts = np.flatnonzero(run == a.cal_samples)
     if len(starts) == 0:
