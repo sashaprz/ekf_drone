@@ -20,6 +20,7 @@ measrement model: accel and mag. they give an absolute reference to correct drif
 the hypothesized orietnation you're comparing accel/mag against is the gyro's measurement
   """
 
+import os
 import time
 import math
 import collections
@@ -86,8 +87,9 @@ def true_yaw_dot(t): return TRUE_AMP_YAW * TRUE_FREQ_YAW * math.cos(TRUE_FREQ_YA
 #filter tuning (never reassigned, so these stay plain module constants even though the
 #per-instance filter state below (q, P, biases, ...) moved onto DroneEKF)
 # 19 states since 2026-10-03: the 18 below + baro_bias(18). Appended last so every older index is unchanged.
-N_STATES = 19
-Q = np.diag([0.01, 0.01, 0.01, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 0.0]) #how much new uncertainty is added by the prediction step (how uncertain you are abt gyro)
+# 20 since 2026-10-18: + field_rot(19), the declination correction - see LEARN_DECLINATION.
+N_STATES = 20
+Q = np.diag([0.01, 0.01, 0.01, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 0.0, 0.0]) #how much new uncertainty is added by the prediction step (how uncertain you are abt gyro)
 R_accel_base = np.diag([ACCEL_NOISE_STD**2] * 3) #matches ACCEL_NOISE_STD above - the old 0.1 placeholder didn't match either sensor's real noise scale
 R_mag = np.diag([MAG_NOISE_STD**2] * 3) #matches MAG_NOISE_STD above - 0.1 was ~30%+ relative noise on a unit vector, wildly unrealistic
 I = np.eye(N_STATES) #identity matrix for updating the covariance
@@ -146,6 +148,19 @@ STALL_ACCEL_STD = 1.0   # m/s^2
 STALL_GPS_ATT_HOLD_S = 1.0
 # how long the held gyro rate / accel are trusted through a stall (decaying coast)
 STALL_COAST_TAU = 0.25  # s
+# declination learning, 2026-10-18. The magnetometer can only measure heading RELATIVE to
+# the earth's field: turning the drone 5deg and turning the field 5deg give the same reading,
+# so a wrong declination in mag_reference becomes a heading error the mag itself can't see.
+# GPS can: when the drone tilts to accelerate, the horizontal part of the thrust (accel,
+# body frame) rotated into the world must match the acceleration GPS velocity shows, and
+# only the TRUE heading makes them agree (the F[6:9, 0:3] attitude->velocity block). State
+# 19, field_rot, rotates mag_reference about world-up; GPS pins true yaw, the mag pins yaw
+# minus field_rot, so field_rot is learned during manoeuvres and just holds in a hover.
+# Off by default (P stays 0 -> bit-for-bit the old filter); EKF_LEARN_DECL=1 turns it on.
+# Prior: the declination source's 1-sigma (sensors.declination_std_deg, see mag_field.py),
+# else DECL_PRIOR_STD_DEG. It's a constant over a flight, so no process noise.
+LEARN_DECLINATION = os.environ.get("EKF_LEARN_DECL", "0") == "1"
+DECL_PRIOR_STD_DEG = float(os.environ.get("EKF_DECL_STD_DEG", "5"))
 # delayed GPS fusion, 2026-10-02: history of predicted pos/vel kept this long, so a fix can
 # be compared with the state at the time it was MEASURED (now - gps_latency)
 GPS_HISTORY_S = 1.5
@@ -311,12 +326,15 @@ def update_H_accel(predicted_accel, H):
     H[0:3, 15:18] = 0            # explicit - accel doesn't see mag bias
     return H
 
-def update_H_mag(predicted_mag, H):
+def update_H_mag(predicted_mag, H, d_mag_d_rot=None):
     H[0:3, 0:3] = skew(predicted_mag)
     H[0:3, 3:6] = 0
     H[0:3, 12:15] = 0            # explicit - mag doesn't see accel bias
     H[0:3, 15:18] = np.eye(3)    # mag rows' Jacobian wrt mag_bias error - same
                                   # derivation as accel_bias's +I (see calibration.py)
+    # declination: predicted = R^T Rz(rot) m_ref, d/d(rot) of Rz(rot) m_ref = z x (Rz(rot) m_ref),
+    # seen from the body: R^T (z x m_ref_rotated)
+    H[0:3, 19] = 0 if d_mag_d_rot is None else d_mag_d_rot
     return H
 
 def update_H_gps(H):
@@ -417,6 +435,7 @@ class DroneEKF:
         self.mag_bias_x = 0
         self.mag_bias_y = 0
         self.mag_bias_z = 0
+        self.field_rot = 0.0  # rad, rotation of the true field about world-up vs mag_reference (state 19)
         self.velocity = np.array([0.0, 0.0, 0.0]) # Initialize velocity
         self.position = np.array([0.0, 0.0, 0.0])
         self.rate = np.array([0.0, 0.0, 0.0])  # bias-corrected gyro, refreshed each step() - exposed via get_state()
@@ -484,6 +503,10 @@ class DroneEKF:
         #modeled them (the vehicle was assumed stationary throughout)
         self.P = np.eye(N_STATES) * 0.1
         self.P[18, 18] = BARO_BIAS_P0
+        # declination state: zero covariance = never corrected = the old 19-state filter
+        self.learn_declination = LEARN_DECLINATION
+        decl_std = float(getattr(sensors, "declination_std_deg", DECL_PRIOR_STD_DEG) or DECL_PRIOR_STD_DEG)
+        self.P[19, 19] = math.radians(decl_std) ** 2 if self.learn_declination else 0.0
         self.P[0:3, 0:3] = _P_cal[0:3, 0:3]      #attitude-attitude
         self.P[0:3, 3:6] = _P_cal[0:3, 3:6]      #attitude-gyro_bias
         self.P[3:6, 0:3] = _P_cal[3:6, 0:3]
@@ -525,6 +548,19 @@ class DroneEKF:
             self.P[:, 12:15] = 0.0
             self.P[12:15, 12:15] = np.eye(3) * 1e-6
 
+        if self.learn_declination:
+            # Calibration found the heading from the mag ASSUMING mag_reference is right, so a
+            # declination error is also a startup heading error - the same one: a field rotated
+            # by phi about world-up makes the mag-derived attitude wrong by phi about the body's
+            # up axis u (q_true = q_est (x) phi*u). So yaw and field_rot start fully correlated.
+            # Without this, the hover's mag updates (which pin yaw - field_rot) plus a confident
+            # calibration yaw collapsed field_rot's sigma 5 -> 0.3deg in 15 s and nothing was learned.
+            u = rotate_by_quat(quat_conjugate(self.q), np.array([0.0, 0.0, 1.0]))
+            var = self.P[19, 19]
+            self.P[0:3, 0:3] += var * np.outer(u, u)
+            self.P[0:3, 19] = var * u
+            self.P[19, 0:3] = var * u
+
         #timing starts here, AFTER calibration - see the comment above where these used to live
         self.last_time = self._clock()
         self.last_gps_time = self._clock()
@@ -552,6 +588,7 @@ class DroneEKF:
         d_accel_bias = correction[12:15]
         d_mag_bias = correction[15:18]
         self.baro_bias += correction[18]
+        self.field_rot += correction[19]
 
         self.bias_x = self.bias_x + d_bias[0]
         self.bias_y = self.bias_y + d_bias[1]
@@ -866,8 +903,13 @@ class DroneEKF:
             #mag correction - predicted_mag uses q as it stands AFTER the accel correction just
             #applied, not the stale pre-accel q - this is what actually removes the overcorrection
             #risk, not just avoiding a bad P0 (see apply_correction's comment)
-            predicted_mag = rotate_by_quat(quat_conjugate(self.q), self._mag_ref)
-            self.H_mag = update_H_mag(predicted_mag, self.H_mag)
+            # the reference field, rotated about world-up by the learned declination correction
+            c, s_ = math.cos(self.field_rot), math.sin(self.field_rot)
+            mag_ref = np.array([c * self._mag_ref[0] - s_ * self._mag_ref[1],
+                                s_ * self._mag_ref[0] + c * self._mag_ref[1], self._mag_ref[2]])
+            predicted_mag = rotate_by_quat(quat_conjugate(self.q), mag_ref)
+            d_mag_d_rot = rotate_by_quat(quat_conjugate(self.q), np.array([-mag_ref[1], mag_ref[0], 0.0]))
+            self.H_mag = update_H_mag(predicted_mag, self.H_mag, d_mag_d_rot)
 
             S_mag = self.H_mag @ self.P @ self.H_mag.T + R_mag
             K_mag = self.P @ self.H_mag.T @ np.linalg.inv(S_mag)
@@ -908,6 +950,12 @@ class DroneEKF:
         sim_time += dt   #advances the ground truth by the same dt the filter just integrated with
 
         return self.get_state()
+
+    @property
+    def declination_correction_deg(self):
+        # field_rot is counter-clockwise about up (east -> north); declination is measured
+        # clockwise (north -> east), so a field found rotated toward east = negative field_rot
+        return -math.degrees(self.field_rot)
 
     def get_state(self):
         #matches the state dict shape PID/cascade.py's Cascade.step() expects

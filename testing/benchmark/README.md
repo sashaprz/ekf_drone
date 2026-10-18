@@ -59,3 +59,9 @@ gps_outliers, mag_bias, mag_interference, imu_spikes.
 - PX4 SITL's shell spins on EOF. Never pipe its stdout into a Python buffer
   (python grew to 4.8 GB); write it to a file.
 - Don't run a replay while a SITL flight is running: both are PX4 instances.
+- PX4 backdates every GPS fix by `SENS_GPS0_DELAY` (110 ms), but Gazebo's GPS has no real
+  latency. Measured against truth velocity, the data lines up with the *arrival* time to
+  about 10 ms. Left alone, EKF2 fused GPS 110 ms early. The converter fused it 220 ms early,
+  because it also told your EKF to delay it by another 110 ms. A timing error during a turn
+  looks exactly like a heading error. `ulog_faults.py --gps-arrival-stamp` and
+  `ulog_to_csv.py --gps-latency 0` fix it for both filters.

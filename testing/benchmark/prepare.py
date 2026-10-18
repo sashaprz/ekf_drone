@@ -87,11 +87,11 @@ def main():
         incl = float(np.nanmedian(inc[np.isfinite(inc) & (inc != 0)]))
         aligned = os.path.join(WORK, name + "__aligned.ulg")
         run([sys.executable, os.path.join(R, "testing", "benchmark", "ulog_faults.py"), ulg, aligned, "none",
-             f"--align-field={decl},{incl}"])
+             f"--align-field={decl},{incl}", "--gps-arrival-stamp"])
         # field direction of the aligned clean log, measured against ground truth (ulog_to_csv's
         # estimate) - every fault variant's csv gets this, so a mag fault can't leak into it
         clean_csv = os.path.join(WORK, name + "__clean.csv")
-        run([sys.executable, os.path.join(R, "testing", "ulog_to_csv.py"), aligned, clean_csv, "--cal-samples", str(CAL_SAMPLES)])
+        run([sys.executable, os.path.join(R, "testing", "ulog_to_csv.py"), aligned, clean_csv, "--cal-samples", str(CAL_SAMPLES), "--gps-latency", "0"])
         meta = json.load(open(clean_csv + ".meta.json"))
         ref = ",".join(str(x) for x in meta["mag_reference"])
         for fault in a.faults.split(","):
@@ -103,10 +103,11 @@ def main():
             patched = os.path.join(WORK, f"{name}__{fault}.ulg")
             info = json.loads(run([sys.executable, os.path.join(R, "testing", "benchmark", "ulog_faults.py"),
                                    ulg, patched, fault, "--seed", str(zlib.crc32(name.encode()) % 10000),
-                                   f"--align-field={decl},{incl}"]))
+                                   f"--align-field={decl},{incl}", "--gps-arrival-stamp"]))
             replayed = ekf2_replay(patched)
             run([sys.executable, os.path.join(R, "testing", "ulog_to_csv.py"), replayed, out_csv,
-                 "--cal-samples", str(CAL_SAMPLES), f"--mag-ref={ref}", f"--truth-from={ulg}"])
+                 "--cal-samples", str(CAL_SAMPLES), f"--mag-ref={ref}", f"--truth-from={ulg}",
+                 "--gps-latency", "0"])
             m = json.load(open(out_csv + ".meta.json"))
             m.update(flight=name, fault=fault, fault_info=info, ekf2_source="replay", wmm_decl_deg=decl, wmm_incl_deg=incl)
             json.dump(m, open(out_csv + ".meta.json", "w"), indent=1)

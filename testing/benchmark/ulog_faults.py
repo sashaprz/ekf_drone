@@ -24,6 +24,13 @@ Field alignment (--align-field DECL,INCL, applied before any fault, for every co
   Gazebo's field direction onto the WMM direction, and rotated back - so the true field
   becomes the one EKF2 assumes, and the other filters measure that same field from the log.
 
+GPS timing (--gps-arrival-stamp, also before any fault): PX4 stamps every fix
+timestamp_sample = arrival - SENS_GPS0_DELAY (110 ms default) and EKF2 fuses it at that
+time, but Gazebo's GPS has no real latency - against ground truth the velocity lines up with
+the ARRIVAL time to ~10 ms. So in SITL every filter was fusing GPS 110 ms too early. This
+sets timestamp_sample = timestamp on both GPS topics; ulog_to_csv.py --gps-latency 0 then
+gives your EKF the same timing.
+
 ULog format (docs.px4.io "ULog File Format"): 16-byte header, then messages
 [uint16 size][uint8 type][payload]. 'F' = format "name:type field;..." , 'A' = subscription
 (multi_id, msg_id, name), 'D' = data (msg_id + packed fields in format order).
@@ -168,6 +175,17 @@ def align_field(u, decl_deg, incl_deg):
     return math.degrees(math.acos(np.clip(gz_dir @ wmm_dir, -1, 1)))
 
 
+def gps_arrival_stamp(u):
+    n = 0
+    for topic in ("vehicle_gps_position", "sensor_gps"):
+        if not u.instances(topic):
+            continue
+        pos, ts = u.read(topic, "timestamp")
+        u.write(topic, "timestamp_sample", pos, ts[:, 0])
+        n += len(pos)
+    return n
+
+
 def apply(u, fault, seed):
     rng = _rng(seed, fault)
     t_to = takeoff_time(u)
@@ -257,13 +275,16 @@ def main():
     ap.add_argument("fault", choices=FAULTS)
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--align-field", default=None, help="DECL_DEG,INCL_DEG of the WMM field EKF2 uses")
+    ap.add_argument("--gps-arrival-stamp", action="store_true")
     a = ap.parse_args()
     u = ULogPatch(open(a.inp, "rb").read())
     rot = None
     if a.align_field:
         rot = align_field(u, *(float(x) for x in a.align_field.split(",")))
+    restamped = gps_arrival_stamp(u) if a.gps_arrival_stamp else 0
     info = apply(u, a.fault, a.seed)
     info["field_rotated_deg"] = rot
+    info["gps_restamped"] = restamped
     open(a.out, "wb").write(u.b)
     import json
     print(json.dumps(info))

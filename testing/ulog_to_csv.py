@@ -94,6 +94,13 @@ def main():
     # PX4's replay re-logs ground truth at only ~7 Hz: take it from the original flight log
     # (50 Hz) instead. Ground truth is interpolated onto the IMU timeline either way.
     ap.add_argument("--truth-from", default=None)
+    # GPS timing. PX4 stamps timestamp_sample = arrival - SENS_GPS0_DELAY (110 ms default), but
+    # Gazebo's GPS has no real latency (~10 ms measured against ground truth), so in SITL the
+    # backdated stamp puts every fix 110 ms in the PAST of the data it holds - and the EKF was
+    # then told to delay it another 110 ms. "--gps-latency 0" places fixes at their arrival
+    # time (timestamp) with no delay compensation: right for SITL. On real hardware, where
+    # the receiver really is late, leave it unset.
+    ap.add_argument("--gps-latency", type=float, default=None)
     a = ap.parse_args()
     from pyulog import ULog
 
@@ -128,7 +135,7 @@ def main():
     flight = slice(c0 + a.cal_samples, len(t))
 
     # GPS -> local ENU (home = first 3D fix), zero-order held onto the IMU timeline
-    tg = gps.get("timestamp_sample", gps["timestamp"]) * 1e-6
+    tg = (gps["timestamp"] if a.gps_latency is not None else gps.get("timestamp_sample", gps["timestamp"])) * 1e-6
     good = gps.get("fix_type", np.full(len(tg), 3)) >= 3
     tg = tg[good]
     lat, lon = gps["latitude_deg"][good], gps["longitude_deg"][good]
@@ -192,7 +199,7 @@ def main():
     spread = float(np.degrees(np.arccos(np.clip(w @ mag_ref / np.linalg.norm(w, axis=1), -1, 1))).std())
 
     params = ulog.initial_parameters
-    gps_delay_ms = params.get("EKF2_GPS_DELAY", 110.0)
+    gps_delay_ms = params.get("EKF2_GPS_DELAY", 110.0) if a.gps_latency is None else a.gps_latency * 1000.0
 
     os.makedirs(os.path.dirname(os.path.abspath(a.csv)), exist_ok=True)
     cols = ["t", "gx", "gy", "gz", "ax", "ay", "az", "mx", "my", "mz", "px", "py", "pz", "vx", "vy", "vz",

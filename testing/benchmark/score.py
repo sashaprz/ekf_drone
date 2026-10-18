@@ -17,6 +17,12 @@ Method (stated again in the report):
     interval, not the mean)
   - paired comparison vs your EKF: per run ratio other/yours; geometric mean ratio with a
     95% bootstrap interval resampling whole flights (runs of one flight are correlated)
+  - field detection (2026-10-18): the replayed filters above are handed the true field
+    direction. "your EKF, detected field" instead gets what real hardware without a magnetic
+    model has: inclination measured from the dwell (state estimation/mag_field.py),
+    declination unknown -> assumed 0 (sigma 20 deg); "+ decl. learning" also turns on
+    FINAL_gps.py's declination state (EKF_LEARN_DECL). EKF2 keeps its WMM, which equals the
+    true field here by construction (prepare.py's field alignment).
   - every run that produced numbers counts in the statistics (a filter that is 30 deg off
     during a manoeuvre is scored 30 deg off, not dropped). "lost" = NaN, or still off in the
     last 10 s airborne: tilt > 10 deg, heading > 30 deg or horizontal position > 10 m
@@ -41,6 +47,8 @@ import replay_ekf
 import run_suite
 import metrics as M
 import benchmark_filters as BF
+import mag_field
+FINAL_gps = replay_ekf.FINAL_gps
 
 DATA = os.path.join(ROOT, "testing", "data", "benchmark")
 GRID = {"madgwick": [{"beta": b, "zeta": z} for b in (0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2)
@@ -48,8 +56,11 @@ GRID = {"madgwick": [{"beta": b, "zeta": z} for b in (0.002, 0.005, 0.01, 0.02, 
         "mahony": [{"kp": kp, "ki": ki} for kp in (0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0)
                    for ki in (0.0, 0.01, 0.05)]}
 DEFAULTS = BF.DEFAULTS
-FILTERS = ["ekf", "ekf2", "madgwick", "madgwick_cv", "mahony", "mahony_cv"]
-LABEL = {"ekf": "**your EKF**", "ekf2": "PX4 EKF2", "madgwick": "Madgwick (default)", "madgwick_cv": "Madgwick (CV-tuned)",
+FILTERS = ["ekf", "ekf_detect", "ekf_detect_learn", "ekf2", "madgwick", "madgwick_cv", "mahony", "mahony_cv"]
+EKFS = ("ekf", "ekf_detect", "ekf_detect_learn")
+POS_FILTERS = EKFS + ("ekf2",)
+LABEL = {"ekf": "**your EKF**", "ekf_detect": "your EKF, detected field", "ekf_detect_learn": "your EKF, detected field + decl. learning",
+         "ekf2": "PX4 EKF2", "madgwick": "Madgwick (default)", "madgwick_cv": "Madgwick (CV-tuned)",
          "mahony": "Mahony (default)", "mahony_cv": "Mahony (CV-tuned)"}
 FAULT_WINDOWS = {"gps_dropout": (25.0, 40.0), "mag_interference": (20.0, 30.0)}  # s after takeoff (ulog_faults.py)
 LOST = {"end_tilt": 10.0, "end_yaw": 30.0, "end_pos_h": 10.0}
@@ -120,6 +131,28 @@ def usable(m):
     return not m.get("nan", False)
 
 
+def replay_ekf_variant(rec, mag_ref, learn, decl_std_deg):
+    """Your EKF on one recording -> (estimate dict, learned declination deg or None)"""
+    c = rec["cols"]
+    n = len(c["t"])
+    est = {"q": np.zeros((n, 4)), "pos": np.zeros((n, 3)), "vel": np.zeros((n, 3))}
+
+    def on_step(i, ekf, st):
+        est["q"][i] = st["quat"]; est["pos"][i] = st["pos"]; est["vel"][i] = st["vel"]
+    src = replay_ekf.ArrayReplay({k: v.tolist() for k, v in c.items()}, remapped=False, cal=rec["cal"])
+    src.gps_latency = rec["meta"].get("gps_latency_s", 0.0)
+    src.mag_reference = tuple(mag_ref)
+    saved = FINAL_gps.LEARN_DECLINATION, FINAL_gps.DECL_PRIOR_STD_DEG
+    FINAL_gps.LEARN_DECLINATION, FINAL_gps.DECL_PRIOR_STD_DEG = learn, decl_std_deg
+    try:
+        ekf = replay_ekf.run_replay(src, c["t"].tolist(), on_step, quiet=True)
+        return est, (ekf.declination_correction_deg if learn else None)
+    except Exception as e:  # a crash inside the filter is a result
+        return {"error": f"{type(e).__name__}: {e}"}, None
+    finally:
+        FINAL_gps.LEARN_DECLINATION, FINAL_gps.DECL_PRIOR_STD_DEG = saved
+
+
 def task(path):
     info = parse_name(path)
     rec = load(path)
@@ -128,6 +161,18 @@ def task(path):
     with np.errstate(all="ignore"):
         r = run_suite.replay(c, False, rec["cal"], meta.get("gps_latency_s", 0.0), meta["mag_reference"])
         out["ekf"] = metrics(rec, r, info["fault"]) if r["error"] is None else {"nan": True, "error": r["error"]}
+        # field detection: dwell inclination + unknown declination (no magnetic model)
+        a0, m0 = np.mean(rec["cal"]["accel"], axis=0), np.mean(rec["cal"]["mag"], axis=0)
+        ref_det, det = mag_field.field_reference(a0, m0)
+        true = np.array(meta["mag_reference"], float)
+        det["true_inclination_deg"] = math.degrees(math.asin(-true[2] / np.linalg.norm(true)))
+        det["true_declination_deg"] = math.degrees(math.atan2(true[0], true[1]))
+        out["field_detect"] = det
+        for key, learn in (("ekf_detect", False), ("ekf_detect_learn", True)):
+            est, decl = replay_ekf_variant(rec, ref_det, learn, det["declination_std_deg"])
+            out[key] = metrics(rec, est, info["fault"]) if "error" not in est else {"nan": True, "error": est["error"]}
+            if decl is not None:
+                out[key]["learned_declination_deg"] = decl
         ep = np.stack([c["epx"], c["epy"], c["epz"]], 1)
         e2 = {"q": np.stack([c["eqw"], c["eqx"], c["eqy"], c["eqz"]], 1), "pos": ep - ep[0],
               "vel": np.stack([c["evx"], c["evy"], c["evz"]], 1)}
@@ -241,8 +286,8 @@ def report(runs, chosen, out_dir):
             ok = [m for m in ms if usable(m)]
             rows.append([LABEL[f], fmt_ci([m["tilt_rms"] for m in ok]), fmt_ci([m["tilt_max"] for m in ok]),
                          fmt_ci([m["yaw_rms"] for m in ok]), fmt_ci([m["yaw_rms_offset_removed"] for m in ok]),
-                         fmt_ci([m.get("pos_h_rms") for m in ok], 3) if f in ("ekf", "ekf2") else "-",
-                         fmt_ci([m.get("vel_rms") for m in ok], 3) if f in ("ekf", "ekf2") else "-",
+                         fmt_ci([m.get("pos_h_rms") for m in ok], 3) if f in POS_FILTERS else "-",
+                         fmt_ci([m.get("vel_rms") for m in ok], 3) if f in POS_FILTERS else "-",
                          f"{sum(lost(m) for m in ms)}/{len(ms)}"])
         L += table(rows, ["filter", "tilt rms °", "tilt max °", "heading rms °", "heading rms, offset removed °",
                           "pos h rms m", "vel rms m/s", "lost"]) + [""]
@@ -258,7 +303,7 @@ def report(runs, chosen, out_dir):
     for other in FILTERS[1:]:
         for key, lab in (("tilt_rms", "tilt rms"), ("yaw_rms", "heading rms"), ("yaw_rms_offset_removed", "heading (offset removed)"),
                          ("pos_h_rms", "pos h rms"), ("vel_rms", "vel rms")):
-            if key in ("pos_h_rms", "vel_rms") and other != "ekf2":
+            if key in ("pos_h_rms", "vel_rms") and other not in POS_FILTERS:
                 continue
             b = boot_ratio(rb, other, key)
             if b:
@@ -270,7 +315,7 @@ def report(runs, chosen, out_dir):
     for key, lab in (("tilt_rms", "tilt rms °"), ("yaw_rms", "heading rms °"), ("pos_h_rms", "pos h rms m")):
         scen = sorted({r["info"]["scenario"] for r in rb})
         rows = []
-        for f in (FILTERS if key != "pos_h_rms" else ["ekf", "ekf2"]):
+        for f in (FILTERS if key != "pos_h_rms" else list(POS_FILTERS)):
             rows.append([LABEL[f]] + [fmt_ci([r[f].get(key) for r in sel(model="x500_bench", fault="none", scenario=s)
                                               if usable(r[f])], 3 if key == "pos_h_rms" else 2) for s in scen])
         L += [f"**{lab}**", ""] + table(rows, ["filter"] + scen) + [""]
@@ -279,7 +324,7 @@ def report(runs, chosen, out_dir):
     L += ["## 4. Per fault (realistic IMU, all scenarios pooled) - mean ± 95% CI over the 18 flights", ""]
     faults = sorted({r["info"]["fault"] for r in rb}, key=lambda f: (f != "none", f))
     for key, lab, fs in (("tilt_rms", "tilt rms °", FILTERS), ("tilt_max", "tilt max °", FILTERS),
-                         ("yaw_rms", "heading rms °", FILTERS), ("pos_h_rms", "pos h rms m", ["ekf", "ekf2"])):
+                         ("yaw_rms", "heading rms °", FILTERS), ("pos_h_rms", "pos h rms m", list(POS_FILTERS))):
         rows = []
         for f in fs:
             cells = []
@@ -304,6 +349,26 @@ def report(runs, chosen, out_dir):
         rows.append([LABEL[f]] + cells)
     L += table(rows, ["filter", "GPS dropout: max pos h err m", "GPS dropout: max tilt °", "mag interference: max heading err °",
                       "mag interference: max tilt °"]) + [""]
+
+    # 6. field detection
+    L += ["## 6. Field detection (no magnetic model: declination assumed 0)", "",
+          "Detected inclination from the 6 s dwell vs the true field, and the declination error that the missing magnetic "
+          "model leaves (true declination of the aligned field). 'learned' = FINAL_gps.py's declination state at the end of "
+          "the flight - it should approach the declination error.", ""]
+    rows = []
+    for flt in faults:
+        rs = sel(model="x500_bench", fault=flt)
+        if not rs or "field_detect" not in rs[0]:
+            continue
+        di = [r["field_detect"]["inclination_deg"] - r["field_detect"]["true_inclination_deg"] for r in rs]
+        dd = [r["field_detect"]["true_declination_deg"] - r["field_detect"]["declination_deg"] for r in rs]
+        learned = [r["ekf_detect_learn"].get("learned_declination_deg") for r in rs]
+        rows.append([flt, fmt_ci(di), fmt_ci(dd), fmt_ci(learned),
+                     fmt_ci([r["ekf"]["yaw_rms"] for r in rs if usable(r["ekf"])]),
+                     fmt_ci([r["ekf_detect"]["yaw_rms"] for r in rs if usable(r["ekf_detect"])]),
+                     fmt_ci([r["ekf_detect_learn"]["yaw_rms"] for r in rs if usable(r["ekf_detect_learn"])])])
+    L += table(rows, ["fault", "inclination error °", "declination error °", "learned declination °",
+                      "heading rms: true field", "heading rms: detected", "heading rms: detected + learning"]) + [""]
 
     L += ["## Caveats", "",
           "- Simulation only. The realistic IMU model (white noise 0.29 °/s, random turn-on gyro bias σ 0.5 °/s, Gauss-Markov "
