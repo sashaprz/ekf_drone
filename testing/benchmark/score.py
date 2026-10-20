@@ -153,10 +153,9 @@ def replay_ekf_variant(rec, mag_ref, learn, decl_std_deg):
         FINAL_gps.LEARN_DECLINATION, FINAL_gps.DECL_PRIOR_STD_DEG = saved
 
 
-def task(path):
-    info = parse_name(path)
-    rec = load(path)
-    out = {"info": info, "ahrs": {}}
+def ekf_part(rec, info):
+    """Your EKF's three variants on one recording - the part --redo-ekf recomputes."""
+    out = {}
     c, meta = rec["cols"], rec["meta"]
     with np.errstate(all="ignore"):
         r = run_suite.replay(c, False, rec["cal"], meta.get("gps_latency_s", 0.0), meta["mag_reference"])
@@ -173,6 +172,22 @@ def task(path):
             out[key] = metrics(rec, est, info["fault"]) if "error" not in est else {"nan": True, "error": est["error"]}
             if decl is not None:
                 out[key]["learned_declination_deg"] = decl
+    return out
+
+
+def redo_ekf(path, old):
+    """Cached recording with only your EKF's entries recomputed (EKF2 / AHRS kept)."""
+    rec = load(path)
+    return path, {**old, **ekf_part(rec, old["info"])}
+
+
+def task(path):
+    info = parse_name(path)
+    rec = load(path)
+    out = {"info": info, "ahrs": {}}
+    c = rec["cols"]
+    with np.errstate(all="ignore"):
+        out.update(ekf_part(rec, info))
         ep = np.stack([c["epx"], c["epy"], c["epz"]], 1)
         e2 = {"q": np.stack([c["eqw"], c["eqx"], c["eqy"], c["eqz"]], 1), "pos": ep - ep[0],
               "vel": np.stack([c["evx"], c["evy"], c["evz"]], 1)}
@@ -398,6 +413,9 @@ def main():
     ap.add_argument("--jobs", type=int, default=max(1, (os.cpu_count() or 2) - 1))
     ap.add_argument("--data", default=DATA)
     ap.add_argument("--only", default=None, help="glob filter on recording names (debugging)")
+    # after a change to FINAL_gps.py: rerun just your EKF on every cached recording (minutes,
+    # not the hours the Madgwick/Mahony gain grid takes)
+    ap.add_argument("--redo-ekf", action="store_true")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     paths = sorted(p for p in glob.glob(os.path.join(a.data, "*__*__t*__*.csv")) if not p.endswith(".cal.csv"))
@@ -408,6 +426,13 @@ def main():
     cache = json.load(open(cache_path)) if os.path.exists(cache_path) else {}
     todo = [p for p in paths if os.path.basename(p) not in cache]
     print(f"{len(paths)} recordings, {len(todo)} to run", flush=True)
+    if a.redo_ekf:
+        redo = [(p, cache[os.path.basename(p)]) for p in paths if os.path.basename(p) in cache]
+        print(f"redoing your EKF on {len(redo)} cached recordings", flush=True)
+        with Pool(a.jobs) as pool:
+            for k, (p, out) in enumerate(pool.starmap(redo_ekf, redo), 1):
+                cache[os.path.basename(p)] = out
+        json.dump(cache, open(cache_path, "w"))
     with Pool(a.jobs) as pool:
         for k, (p, out) in enumerate(pool.imap_unordered(task, todo), 1):
             cache[os.path.basename(p)] = out

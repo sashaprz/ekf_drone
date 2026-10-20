@@ -12,9 +12,9 @@ CV-tuned gains chosen (per held-out trial): madgwick t1: `{"beta": 0.05, "zeta":
 
 | filter | tilt rms ° | tilt max ° | heading rms ° | heading rms, offset removed ° | pos h rms m | vel rms m/s | lost |
 |---|---|---|---|---|---|---|---|
-| **your EKF** | 2.20 ± 0.57 | 6.16 ± 1.45 | 6.01 ± 2.83 | 5.07 ± 2.17 | 0.224 ± 0.042 | 0.324 ± 0.077 | 0/18 |
-| your EKF, detected field | 2.10 ± 0.61 | 5.54 ± 1.48 | 7.55 ± 5.14 | 5.02 ± 2.87 | 0.196 ± 0.044 | 0.303 ± 0.085 | 1/18 |
-| your EKF, detected field + decl. learning | 4.32 ± 3.67 | 13.51 ± 9.00 | 18.39 ± 6.65 | 12.90 ± 4.31 | 0.260 ± 0.134 | 0.515 ± 0.383 | 2/18 |
+| **your EKF** | 1.00 ± 0.28 | 3.00 ± 0.90 | 4.86 ± 1.32 | 4.19 ± 1.23 | 0.073 ± 0.012 | 0.100 ± 0.029 | 0/18 |
+| your EKF, detected field | 1.01 ± 0.32 | 3.44 ± 1.38 | 4.91 ± 1.31 | 3.80 ± 1.28 | 0.073 ± 0.012 | 0.102 ± 0.032 | 0/18 |
+| your EKF, detected field + decl. learning | 0.73 ± 0.19 | 2.46 ± 0.92 | 3.88 ± 1.03 | 3.48 ± 0.91 | 0.074 ± 0.012 | 0.089 ± 0.024 | 0/18 |
 | PX4 EKF2 | 0.13 ± 0.04 | 0.90 ± 0.35 | 2.06 ± 0.82 | 1.05 ± 0.42 | 0.061 ± 0.014 | 0.078 ± 0.020 | 0/18 |
 | Madgwick (default) | 4.35 ± 1.53 | 9.92 ± 3.04 | 6.03 ± 2.46 | 4.67 ± 1.69 | - | - | 0/18 |
 | Madgwick (CV-tuned) | 3.49 ± 1.44 | 7.58 ± 2.82 | 4.57 ± 1.91 | 3.10 ± 1.12 | - | - | 0/18 |
@@ -27,9 +27,9 @@ CV-tuned gains chosen (per held-out trial): madgwick t1: `{"beta": 0.05, "zeta":
 
 | filter | tilt rms ° | tilt max ° | heading rms ° | heading rms, offset removed ° | pos h rms m | vel rms m/s | lost |
 |---|---|---|---|---|---|---|---|
-| **your EKF** | 2.34 ± 0.67 | 9.32 ± 5.86 | 4.50 ± 1.03 | 3.84 ± 0.94 | 0.222 ± 0.047 | 0.369 ± 0.095 | 0/18 |
-| your EKF, detected field | 2.56 ± 0.79 | 9.69 ± 5.79 | 5.06 ± 1.23 | 3.87 ± 1.23 | 0.209 ± 0.043 | 0.394 ± 0.103 | 0/18 |
-| your EKF, detected field + decl. learning | 2.13 ± 0.57 | 7.52 ± 2.84 | 9.99 ± 4.28 | 6.48 ± 2.00 | 0.196 ± 0.040 | 0.363 ± 0.098 | 2/18 |
+| **your EKF** | 1.51 ± 0.30 | 4.30 ± 1.37 | 4.78 ± 1.41 | 3.96 ± 1.36 | 0.085 ± 0.015 | 0.239 ± 0.086 | 0/18 |
+| your EKF, detected field | 1.57 ± 0.36 | 5.16 ± 1.94 | 5.59 ± 1.67 | 4.37 ± 1.67 | 0.088 ± 0.017 | 0.247 ± 0.087 | 0/18 |
+| your EKF, detected field + decl. learning | 1.39 ± 0.29 | 4.38 ± 1.98 | 4.35 ± 1.20 | 3.55 ± 1.22 | 0.085 ± 0.016 | 0.234 ± 0.087 | 0/18 |
 | PX4 EKF2 | 1.54 ± 0.19 | 3.81 ± 1.01 | 4.14 ± 1.47 | 2.97 ± 0.62 | 0.184 ± 0.018 | 0.347 ± 0.066 | 0/18 |
 | Madgwick (default) | 5.12 ± 1.62 | 12.28 ± 3.66 | 7.06 ± 3.48 | 5.11 ± 1.99 | - | - | 0/18 |
 | Madgwick (CV-tuned) | 3.53 ± 1.14 | 8.20 ± 2.62 | 4.66 ± 1.73 | 3.13 ± 0.91 | - | - | 0/18 |
@@ -42,9 +42,9 @@ CV-tuned gains chosen (per held-out trial): madgwick t1: `{"beta": 0.05, "zeta":
 
 | filter | tilt rms ° | tilt max ° | heading rms ° | heading rms, offset removed ° | pos h rms m | vel rms m/s | lost |
 |---|---|---|---|---|---|---|---|
-| **your EKF** | 2.37 ± 0.22 | 8.30 ± 1.22 | 5.51 ± 0.76 | 4.70 ± 0.61 | 1.585 ± 0.687 | 0.595 ± 0.141 | 0/144 |
-| your EKF, detected field | 3.10 ± 0.78 | 9.74 ± 2.05 | 8.03 ± 2.01 | 6.25 ± 1.45 | 1.884 ± 1.136 | 0.708 ± 0.241 | 3/144 |
-| your EKF, detected field + decl. learning | 3.07 ± 0.73 | 10.79 ± 2.06 | 13.31 ± 2.41 | 8.76 ± 1.42 | 1.419 ± 0.614 | 0.626 ± 0.127 | 19/144 |
+| **your EKF** | 2.02 ± 0.28 | 7.41 ± 1.40 | 5.86 ± 0.81 | 5.00 ± 0.76 | 1.751 ± 0.843 | 0.558 ± 0.162 | 0/144 |
+| your EKF, detected field | 2.31 ± 0.36 | 9.38 ± 1.85 | 9.08 ± 2.16 | 7.42 ± 1.86 | 1.759 ± 0.811 | 0.578 ± 0.157 | 10/144 |
+| your EKF, detected field + decl. learning | 1.93 ± 0.24 | 7.68 ± 1.56 | 7.31 ± 1.85 | 6.10 ± 1.57 | 1.588 ± 0.752 | 0.527 ± 0.141 | 4/144 |
 | PX4 EKF2 | 1.92 ± 0.12 | 5.45 ± 0.66 | 6.31 ± 1.02 | 4.29 ± 0.50 | 1.288 ± 0.590 | 0.568 ± 0.104 | 2/144 |
 | Madgwick (default) | 5.33 ± 0.56 | 13.24 ± 1.33 | 8.39 ± 1.28 | 6.03 ± 0.76 | - | - | 1/144 |
 | Madgwick (CV-tuned) | 3.93 ± 0.45 | 9.30 ± 1.06 | 6.30 ± 0.93 | 4.04 ± 0.53 | - | - | 2/144 |
@@ -59,33 +59,33 @@ Ratio = other filter's error / your EKF's error on the *same run*, geometric mea
 
 | vs | metric | ratio [95% CI] | EKF better | runs |
 |---|---|---|---|---|
-| your EKF, detected field | tilt rms | 1.05 [0.90, 1.25] | 53% | 162 |
-| your EKF, detected field | heading rms | 1.24 [1.00, 1.58] | 57% | 162 |
-| your EKF, detected field | heading (offset removed) | 1.03 [0.85, 1.26] | 49% | 162 |
-| your EKF, detected field | pos h rms | 0.96 [0.81, 1.14] | 42% | 162 |
-| your EKF, detected field | vel rms | 1.06 [0.93, 1.21] | 44% | 162 |
-| your EKF, detected field + decl. learning | tilt rms | 1.02 [0.89, 1.16] | 54% | 162 |
-| your EKF, detected field + decl. learning | heading rms | 2.03 [1.46, 3.04] | 77% | 162 |
-| your EKF, detected field + decl. learning | heading (offset removed) | 1.72 [1.29, 2.38] | 75% | 162 |
-| your EKF, detected field + decl. learning | pos h rms | 0.90 [0.78, 1.04] | 39% | 162 |
-| your EKF, detected field + decl. learning | vel rms | 1.01 [0.92, 1.12] | 43% | 162 |
-| PX4 EKF2 | tilt rms | 0.84 [0.68, 1.05] | 34% | 162 |
-| PX4 EKF2 | heading rms | 1.07 [0.80, 1.50] | 44% | 162 |
-| PX4 EKF2 | heading (offset removed) | 0.95 [0.73, 1.25] | 48% | 162 |
-| PX4 EKF2 | pos h rms | 0.97 [0.80, 1.17] | 48% | 162 |
-| PX4 EKF2 | vel rms | 1.04 [0.93, 1.18] | 57% | 162 |
-| Madgwick (default) | tilt rms | 1.89 [1.41, 2.52] | 75% | 162 |
-| Madgwick (default) | heading rms | 1.29 [0.90, 1.91] | 56% | 162 |
-| Madgwick (default) | heading (offset removed) | 1.20 [0.89, 1.66] | 51% | 162 |
-| Madgwick (CV-tuned) | tilt rms | 1.44 [1.14, 1.81] | 65% | 162 |
-| Madgwick (CV-tuned) | heading rms | 1.00 [0.74, 1.35] | 49% | 162 |
-| Madgwick (CV-tuned) | heading (offset removed) | 0.84 [0.66, 1.06] | 40% | 162 |
-| Mahony (default) | tilt rms | 2.17 [1.72, 2.74] | 86% | 162 |
-| Mahony (default) | heading rms | 1.83 [1.29, 2.58] | 73% | 162 |
-| Mahony (default) | heading (offset removed) | 1.04 [0.76, 1.43] | 48% | 162 |
-| Mahony (CV-tuned) | tilt rms | 2.04 [1.62, 2.56] | 85% | 162 |
-| Mahony (CV-tuned) | heading rms | 1.43 [1.02, 1.99] | 65% | 162 |
-| Mahony (CV-tuned) | heading (offset removed) | 1.09 [0.83, 1.43] | 56% | 162 |
+| your EKF, detected field | tilt rms | 1.07 [1.00, 1.17] | 53% | 162 |
+| your EKF, detected field | heading rms | 1.26 [0.98, 1.68] | 60% | 162 |
+| your EKF, detected field | heading (offset removed) | 1.11 [0.91, 1.37] | 48% | 162 |
+| your EKF, detected field | pos h rms | 1.06 [1.02, 1.10] | 53% | 162 |
+| your EKF, detected field | vel rms | 1.06 [1.01, 1.12] | 45% | 162 |
+| your EKF, detected field + decl. learning | tilt rms | 0.95 [0.88, 1.03] | 33% | 162 |
+| your EKF, detected field + decl. learning | heading rms | 1.06 [0.83, 1.40] | 50% | 162 |
+| your EKF, detected field + decl. learning | heading (offset removed) | 1.01 [0.84, 1.23] | 49% | 162 |
+| your EKF, detected field + decl. learning | pos h rms | 1.02 [0.98, 1.06] | 56% | 162 |
+| your EKF, detected field + decl. learning | vel rms | 1.00 [0.95, 1.05] | 31% | 162 |
+| PX4 EKF2 | tilt rms | 1.07 [0.86, 1.33] | 56% | 162 |
+| PX4 EKF2 | heading rms | 1.06 [0.72, 1.58] | 52% | 162 |
+| PX4 EKF2 | heading (offset removed) | 0.99 [0.69, 1.39] | 57% | 162 |
+| PX4 EKF2 | pos h rms | 2.21 [2.00, 2.45] | 91% | 162 |
+| PX4 EKF2 | vel rms | 1.54 [1.34, 1.81] | 87% | 162 |
+| Madgwick (default) | tilt rms | 2.40 [1.83, 3.14] | 87% | 162 |
+| Madgwick (default) | heading rms | 1.28 [0.96, 1.81] | 62% | 162 |
+| Madgwick (default) | heading (offset removed) | 1.25 [0.98, 1.67] | 54% | 162 |
+| Madgwick (CV-tuned) | tilt rms | 1.83 [1.51, 2.21] | 85% | 162 |
+| Madgwick (CV-tuned) | heading rms | 0.99 [0.80, 1.25] | 52% | 162 |
+| Madgwick (CV-tuned) | heading (offset removed) | 0.87 [0.72, 1.08] | 36% | 162 |
+| Mahony (default) | tilt rms | 2.77 [2.23, 3.44] | 91% | 162 |
+| Mahony (default) | heading rms | 1.81 [1.26, 2.58] | 73% | 162 |
+| Mahony (default) | heading (offset removed) | 1.08 [0.81, 1.48] | 48% | 162 |
+| Mahony (CV-tuned) | tilt rms | 2.60 [2.08, 3.22] | 90% | 162 |
+| Mahony (CV-tuned) | heading rms | 1.42 [1.07, 1.91] | 62% | 162 |
+| Mahony (CV-tuned) | heading (offset removed) | 1.13 [0.87, 1.49] | 52% | 162 |
 
 ## 3. Per scenario (realistic IMU, no fault) - mean ± 95% CI over trials
 
@@ -93,9 +93,9 @@ Ratio = other filter's error / your EKF's error on the *same run*, geometric mea
 
 | filter | box | circle_fast | figure8 | hover | stops | yaw_spin |
 |---|---|---|---|---|---|---|
-| **your EKF** | 1.61 ± 1.94 | 2.69 ± 3.08 | 2.91 ± 0.64 | 1.23 ± 0.74 | 3.87 ± 6.74 | 1.74 ± 2.43 |
-| your EKF, detected field | 1.26 ± 0.94 | 4.32 ± 5.19 | 3.73 ± 1.42 | 0.89 ± 0.73 | 3.19 ± 5.59 | 1.96 ± 1.78 |
-| your EKF, detected field + decl. learning | 1.13 ± 0.76 | 2.49 ± 3.93 | 3.90 ± 1.64 | 0.89 ± 0.77 | 2.42 ± 1.75 | 1.92 ± 1.67 |
+| **your EKF** | 1.10 ± 0.94 | 2.04 ± 1.11 | 2.05 ± 0.98 | 0.66 ± 0.46 | 1.72 ± 0.89 | 1.50 ± 1.88 |
+| your EKF, detected field | 1.15 ± 0.78 | 1.99 ± 1.24 | 2.66 ± 1.37 | 0.65 ± 0.46 | 1.46 ± 1.10 | 1.50 ± 1.88 |
+| your EKF, detected field + decl. learning | 0.92 ± 0.64 | 1.64 ± 0.64 | 2.07 ± 0.72 | 0.65 ± 0.47 | 1.52 ± 1.70 | 1.50 ± 1.88 |
 | PX4 EKF2 | 1.55 ± 0.67 | 1.80 ± 0.32 | 1.37 ± 1.22 | 1.47 ± 0.39 | 1.99 ± 1.25 | 1.06 ± 0.63 |
 | Madgwick (default) | 3.79 ± 0.25 | 10.08 ± 1.51 | 8.56 ± 0.88 | 0.82 ± 0.24 | 5.72 ± 2.53 | 1.77 ± 2.02 |
 | Madgwick (CV-tuned) | 2.22 ± 1.86 | 6.19 ± 5.20 | 6.64 ± 2.14 | 0.82 ± 0.27 | 3.44 ± 3.49 | 1.86 ± 2.12 |
@@ -106,9 +106,9 @@ Ratio = other filter's error / your EKF's error on the *same run*, geometric mea
 
 | filter | box | circle_fast | figure8 | hover | stops | yaw_spin |
 |---|---|---|---|---|---|---|
-| **your EKF** | 3.91 ± 6.04 | 3.68 ± 2.96 | 4.96 ± 3.75 | 3.83 ± 4.58 | 6.84 ± 4.51 | 3.79 ± 9.31 |
-| your EKF, detected field | 4.20 ± 4.02 | 4.19 ± 2.63 | 6.33 ± 4.30 | 4.31 ± 3.26 | 4.75 ± 6.23 | 6.56 ± 14.89 |
-| your EKF, detected field + decl. learning | 5.60 ± 4.04 | 4.37 ± 2.66 | 10.91 ± 19.56 | 16.44 ± 47.95 | 9.99 ± 15.81 | 12.62 ± 24.62 |
+| **your EKF** | 3.77 ± 5.81 | 7.14 ± 12.37 | 7.24 ± 9.33 | 3.08 ± 4.38 | 4.88 ± 1.45 | 2.56 ± 2.53 |
+| your EKF, detected field | 4.08 ± 3.80 | 6.45 ± 10.26 | 11.17 ± 5.18 | 3.86 ± 2.36 | 5.17 ± 9.71 | 2.84 ± 4.75 |
+| your EKF, detected field + decl. learning | 2.23 ± 1.61 | 4.81 ± 7.85 | 7.83 ± 5.62 | 2.78 ± 3.19 | 3.15 ± 3.33 | 5.29 ± 5.98 |
 | PX4 EKF2 | 3.19 ± 2.52 | 2.76 ± 2.51 | 3.90 ± 7.10 | 2.99 ± 1.57 | 3.38 ± 2.94 | 8.60 ± 15.19 |
 | Madgwick (default) | 2.69 ± 1.17 | 21.98 ± 14.71 | 8.26 ± 4.19 | 1.92 ± 1.54 | 4.34 ± 6.44 | 3.19 ± 1.48 |
 | Madgwick (CV-tuned) | 1.91 ± 1.73 | 8.56 ± 7.21 | 9.56 ± 9.46 | 1.87 ± 1.20 | 3.57 ± 4.98 | 2.48 ± 0.80 |
@@ -119,9 +119,9 @@ Ratio = other filter's error / your EKF's error on the *same run*, geometric mea
 
 | filter | box | circle_fast | figure8 | hover | stops | yaw_spin |
 |---|---|---|---|---|---|---|
-| **your EKF** | 0.206 ± 0.343 | 0.200 ± 0.175 | 0.220 ± 0.095 | 0.243 ± 0.037 | 0.284 ± 0.388 | 0.177 ± 0.423 |
-| your EKF, detected field | 0.129 ± 0.222 | 0.231 ± 0.085 | 0.290 ± 0.128 | 0.201 ± 0.199 | 0.254 ± 0.279 | 0.149 ± 0.276 |
-| your EKF, detected field + decl. learning | 0.128 ± 0.228 | 0.188 ± 0.144 | 0.296 ± 0.108 | 0.201 ± 0.195 | 0.214 ± 0.186 | 0.147 ± 0.275 |
+| **your EKF** | 0.072 ± 0.018 | 0.111 ± 0.019 | 0.094 ± 0.014 | 0.060 ± 0.014 | 0.120 ± 0.137 | 0.050 ± 0.019 |
+| your EKF, detected field | 0.072 ± 0.018 | 0.111 ± 0.021 | 0.115 ± 0.033 | 0.060 ± 0.014 | 0.122 ± 0.146 | 0.050 ± 0.019 |
+| your EKF, detected field + decl. learning | 0.072 ± 0.018 | 0.111 ± 0.021 | 0.094 ± 0.017 | 0.060 ± 0.014 | 0.122 ± 0.150 | 0.050 ± 0.019 |
 | PX4 EKF2 | 0.200 ± 0.067 | 0.220 ± 0.030 | 0.195 ± 0.093 | 0.172 ± 0.041 | 0.193 ± 0.076 | 0.125 ± 0.104 |
 
 ## 4. Per fault (realistic IMU, all scenarios pooled) - mean ± 95% CI over the 18 flights
@@ -130,9 +130,9 @@ Ratio = other filter's error / your EKF's error on the *same run*, geometric mea
 
 | filter | none | accel_bias_step | gps_dropout | gps_outliers | gyro_bias_step | gyro_drift | imu_spikes | mag_bias | mag_interference |
 |---|---|---|---|---|---|---|---|---|---|
-| **your EKF** | 2.34 ± 0.67 | 2.30 ± 0.37 | 3.64 ± 1.18 | 2.11 ± 0.43 | 2.11 ± 0.42 | 2.08 ± 0.41 | 2.25 ± 0.40 | 2.28 ± 0.53 | 2.19 ± 0.64 |
-| your EKF, detected field | 2.56 ± 0.79 | 2.27 ± 0.57 | 5.55 ± 4.69 (1 lost) | 2.53 ± 0.89 | 2.51 ± 0.88 | 2.50 ± 0.87 | 2.72 ± 0.92 | 4.70 ± 3.56 (2 lost) | 2.03 ± 0.51 |
-| your EKF, detected field + decl. learning | 2.13 ± 0.57 (2 lost) | 4.55 ± 4.14 (2 lost) | 3.84 ± 1.28 (2 lost) | 2.23 ± 0.64 (2 lost) | 2.29 ± 0.69 (1 lost) | 2.25 ± 0.65 (2 lost) | 2.33 ± 0.56 (2 lost) | 5.03 ± 3.57 (6 lost) | 2.01 ± 0.53 (2 lost) |
+| **your EKF** | 1.51 ± 0.30 | 1.88 ± 0.30 | 4.81 ± 1.57 | 1.51 ± 0.29 | 1.50 ± 0.29 | 1.51 ± 0.30 | 1.82 ± 0.24 | 1.63 ± 0.43 | 1.49 ± 0.30 |
+| your EKF, detected field | 1.57 ± 0.36 | 2.02 ± 0.47 (1 lost) | 5.16 ± 1.75 (3 lost) | 1.56 ± 0.34 | 1.62 ± 0.39 (2 lost) | 1.60 ± 0.37 (1 lost) | 1.83 ± 0.26 | 3.10 ± 1.53 (2 lost) | 1.57 ± 0.39 (1 lost) |
+| your EKF, detected field + decl. learning | 1.39 ± 0.29 | 1.76 ± 0.32 | 3.58 ± 0.48 | 1.48 ± 0.41 (1 lost) | 1.36 ± 0.27 | 1.36 ± 0.27 | 1.75 ± 0.26 (1 lost) | 2.81 ± 1.42 (2 lost) | 1.34 ± 0.27 |
 | PX4 EKF2 | 1.54 ± 0.19 | 1.58 ± 0.18 | 2.32 ± 0.49 | 1.54 ± 0.19 | 2.93 ± 0.37 (2 lost) | 1.70 ± 0.25 | 2.14 ± 0.16 | 1.56 ± 0.20 | 1.58 ± 0.21 |
 | Madgwick (default) | 5.12 ± 1.62 | 5.35 ± 1.50 | 5.12 ± 1.62 | 5.13 ± 1.62 | 5.13 ± 1.61 | 5.12 ± 1.62 | 5.11 ± 1.60 | 5.55 ± 1.74 (1 lost) | 6.17 ± 1.48 |
 | Madgwick (CV-tuned) | 3.53 ± 1.14 | 3.81 ± 1.09 | 3.53 ± 1.14 | 3.53 ± 1.14 | 3.53 ± 1.11 | 3.52 ± 1.15 | 3.75 ± 1.17 | 4.86 ± 1.92 (1 lost) | 4.92 ± 1.21 (1 lost) |
@@ -143,9 +143,9 @@ Ratio = other filter's error / your EKF's error on the *same run*, geometric mea
 
 | filter | none | accel_bias_step | gps_dropout | gps_outliers | gyro_bias_step | gyro_drift | imu_spikes | mag_bias | mag_interference |
 |---|---|---|---|---|---|---|---|---|---|
-| **your EKF** | 9.32 ± 5.86 | 7.72 ± 1.99 | 13.26 ± 4.88 | 6.59 ± 1.76 | 6.73 ± 1.79 | 6.42 ± 1.62 | 7.52 ± 1.59 | 8.66 ± 2.76 | 9.47 ± 6.68 |
-| your EKF, detected field | 9.69 ± 5.79 | 5.96 ± 1.66 | 15.94 ± 9.49 (1 lost) | 7.78 ± 3.57 | 7.98 ± 3.71 | 7.81 ± 3.44 | 9.27 ± 3.57 | 16.36 ± 10.30 (2 lost) | 6.83 ± 2.40 |
-| your EKF, detected field + decl. learning | 7.52 ± 2.84 (2 lost) | 13.12 ± 8.68 (2 lost) | 14.73 ± 4.80 (2 lost) | 7.90 ± 3.42 (2 lost) | 8.94 ± 3.83 (1 lost) | 8.04 ± 3.35 (2 lost) | 8.31 ± 2.71 (2 lost) | 18.00 ± 10.43 (6 lost) | 7.32 ± 2.67 (2 lost) |
+| **your EKF** | 4.30 ± 1.37 | 5.65 ± 2.29 | 20.56 ± 7.11 | 5.15 ± 2.32 | 5.01 ± 2.00 | 5.14 ± 2.20 | 6.51 ± 1.69 | 6.76 ± 3.33 | 4.51 ± 1.59 |
+| your EKF, detected field | 5.16 ± 1.94 | 6.72 ± 2.86 (1 lost) | 22.40 ± 7.56 (3 lost) | 5.75 ± 2.44 | 5.83 ± 2.53 (2 lost) | 5.82 ± 2.41 (1 lost) | 6.83 ± 1.73 | 15.94 ± 8.68 (2 lost) | 5.73 ± 2.42 (1 lost) |
+| your EKF, detected field + decl. learning | 4.38 ± 1.98 | 5.33 ± 2.67 | 15.78 ± 3.16 | 5.58 ± 3.42 (1 lost) | 4.52 ± 2.23 | 4.62 ± 2.54 | 6.53 ± 1.97 (1 lost) | 15.20 ± 8.89 (2 lost) | 3.86 ± 1.40 |
 | PX4 EKF2 | 3.81 ± 1.01 | 4.01 ± 1.11 | 5.90 ± 1.53 | 3.82 ± 1.01 | 11.43 ± 3.08 (2 lost) | 4.49 ± 1.22 | 5.72 ± 0.85 | 4.27 ± 1.11 | 3.94 ± 1.10 |
 | Madgwick (default) | 12.28 ± 3.66 | 12.36 ± 3.44 | 12.26 ± 3.63 | 12.30 ± 3.65 | 12.59 ± 3.89 | 12.44 ± 3.75 | 12.46 ± 3.55 | 13.22 ± 4.29 (1 lost) | 18.28 ± 3.61 |
 | Madgwick (CV-tuned) | 8.20 ± 2.62 | 8.48 ± 2.52 | 8.17 ± 2.58 | 8.22 ± 2.63 | 8.30 ± 2.67 | 8.39 ± 2.79 | 9.04 ± 2.52 | 11.20 ± 4.42 (1 lost) | 12.58 ± 3.24 (1 lost) |
@@ -156,9 +156,9 @@ Ratio = other filter's error / your EKF's error on the *same run*, geometric mea
 
 | filter | none | accel_bias_step | gps_dropout | gps_outliers | gyro_bias_step | gyro_drift | imu_spikes | mag_bias | mag_interference |
 |---|---|---|---|---|---|---|---|---|---|
-| **your EKF** | 4.50 ± 1.03 | 5.12 ± 1.28 | 7.00 ± 2.19 | 4.29 ± 0.92 | 4.46 ± 0.99 | 4.41 ± 0.97 | 4.98 ± 1.06 | 9.19 ± 4.74 | 4.59 ± 1.09 |
-| your EKF, detected field | 5.06 ± 1.23 | 4.76 ± 1.29 | 9.26 ± 5.99 (1 lost) | 5.32 ± 1.31 | 5.28 ± 1.24 | 5.35 ± 1.33 | 5.49 ± 1.14 | 23.25 ± 12.60 (2 lost) | 5.49 ± 2.25 |
-| your EKF, detected field + decl. learning | 9.99 ± 4.28 (2 lost) | 13.78 ± 5.53 (2 lost) | 12.20 ± 5.25 (2 lost) | 10.10 ± 4.34 (2 lost) | 10.25 ± 4.02 (1 lost) | 10.15 ± 4.46 (2 lost) | 10.04 ± 4.32 (2 lost) | 29.63 ± 12.73 (6 lost) | 10.32 ± 5.07 (2 lost) |
+| **your EKF** | 4.78 ± 1.41 | 4.50 ± 1.18 | 9.80 ± 3.39 | 4.68 ± 1.32 | 4.68 ± 1.32 | 4.77 ± 1.37 | 5.04 ± 1.37 | 8.76 ± 3.79 | 4.61 ± 1.37 |
+| your EKF, detected field | 5.59 ± 1.67 | 5.76 ± 2.20 (1 lost) | 16.27 ± 8.14 (3 lost) | 5.03 ± 1.35 | 5.94 ± 2.35 (2 lost) | 5.98 ± 1.97 (1 lost) | 5.30 ± 1.34 | 22.95 ± 12.32 (2 lost) | 5.44 ± 2.36 (1 lost) |
+| your EKF, detected field + decl. learning | 4.35 ± 1.20 | 4.17 ± 1.08 | 7.90 ± 2.44 | 5.19 ± 2.31 (1 lost) | 4.20 ± 1.24 | 4.37 ± 1.21 | 5.61 ± 1.68 (1 lost) | 22.76 ± 12.10 (2 lost) | 4.28 ± 1.17 |
 | PX4 EKF2 | 4.14 ± 1.47 | 4.10 ± 1.24 | 4.95 ± 2.03 | 4.13 ± 1.47 | 15.25 ± 5.05 (2 lost) | 5.06 ± 1.91 | 6.45 ± 2.58 | 5.19 ± 1.38 | 5.36 ± 1.81 |
 | Madgwick (default) | 7.06 ± 3.48 | 6.70 ± 3.43 | 7.05 ± 3.47 | 7.05 ± 3.48 | 7.38 ± 3.70 | 7.07 ± 3.47 | 6.98 ± 3.39 | 12.22 ± 3.82 (1 lost) | 12.66 ± 3.45 |
 | Madgwick (CV-tuned) | 4.66 ± 1.73 | 4.45 ± 1.72 | 4.66 ± 1.73 | 4.66 ± 1.72 | 4.86 ± 1.66 | 4.79 ± 1.94 | 4.95 ± 1.91 | 11.79 ± 3.94 (1 lost) | 10.27 ± 3.16 (1 lost) |
@@ -169,18 +169,18 @@ Ratio = other filter's error / your EKF's error on the *same run*, geometric mea
 
 | filter | none | accel_bias_step | gps_dropout | gps_outliers | gyro_bias_step | gyro_drift | imu_spikes | mag_bias | mag_interference |
 |---|---|---|---|---|---|---|---|---|---|
-| **your EKF** | 0.222 ± 0.047 | 0.269 ± 0.053 | 10.871 ± 3.033 | 0.488 ± 0.530 | 0.218 ± 0.044 | 0.226 ± 0.048 | 0.206 ± 0.033 | 0.210 ± 0.040 | 0.188 ± 0.040 |
-| your EKF, detected field | 0.209 ± 0.043 | 0.240 ± 0.050 | 13.433 ± 7.228 (1 lost) | 0.315 ± 0.213 | 0.214 ± 0.045 | 0.221 ± 0.046 | 0.208 ± 0.039 | 0.262 ± 0.131 (2 lost) | 0.179 ± 0.040 |
-| your EKF, detected field + decl. learning | 0.196 ± 0.040 (2 lost) | 0.304 ± 0.139 (2 lost) | 9.811 ± 2.671 (2 lost) | 0.203 ± 0.045 (2 lost) | 0.201 ± 0.045 (1 lost) | 0.203 ± 0.043 (2 lost) | 0.194 ± 0.039 (2 lost) | 0.263 ± 0.129 (6 lost) | 0.172 ± 0.038 (2 lost) |
+| **your EKF** | 0.085 ± 0.015 | 0.079 ± 0.012 | 13.447 ± 3.529 | 0.077 ± 0.011 | 0.079 ± 0.011 | 0.080 ± 0.013 | 0.081 ± 0.010 | 0.085 ± 0.014 | 0.081 ± 0.014 |
+| your EKF, detected field | 0.088 ± 0.017 | 0.088 ± 0.017 (1 lost) | 13.442 ± 2.995 (3 lost) | 0.079 ± 0.012 | 0.083 ± 0.013 (2 lost) | 0.084 ± 0.015 (1 lost) | 0.083 ± 0.011 | 0.128 ± 0.055 (2 lost) | 0.086 ± 0.016 (1 lost) |
+| your EKF, detected field + decl. learning | 0.085 ± 0.016 | 0.079 ± 0.012 | 12.097 ± 3.087 | 0.081 ± 0.015 (1 lost) | 0.079 ± 0.011 | 0.080 ± 0.013 | 0.083 ± 0.012 (1 lost) | 0.126 ± 0.053 (2 lost) | 0.082 ± 0.015 |
 | PX4 EKF2 | 0.184 ± 0.018 | 0.186 ± 0.017 | 8.822 ± 2.960 | 0.184 ± 0.017 | 0.288 ± 0.023 (2 lost) | 0.204 ± 0.025 | 0.248 ± 0.013 | 0.184 ± 0.017 | 0.188 ± 0.018 |
 
 ## 5. During the fault (+10 s recovery)
 
 | filter | GPS dropout: max pos h err m | GPS dropout: max tilt ° | mag interference: max heading err ° | mag interference: max tilt ° |
 |---|---|---|---|---|
-| **your EKF** | 47.31 ± 13.75 | 12.92 ± 4.92 | 7.58 ± 2.17 | 3.34 ± 0.69 |
-| your EKF, detected field | 59.63 ± 33.03 | 14.94 ± 8.04 | 8.85 ± 3.49 | 3.86 ± 1.27 |
-| your EKF, detected field + decl. learning | 43.41 ± 10.88 | 13.36 ± 4.59 | 14.49 ± 6.63 | 4.35 ± 1.37 |
+| **your EKF** | 60.14 ± 15.29 | 20.31 ± 7.14 | 9.29 ± 3.03 | 2.75 ± 0.67 |
+| your EKF, detected field | 60.64 ± 13.83 | 21.19 ± 7.82 | 9.02 ± 2.58 | 2.69 ± 0.59 |
+| your EKF, detected field + decl. learning | 56.30 ± 13.96 | 15.35 ± 3.09 | 8.69 ± 3.37 | 2.56 ± 0.68 |
 | PX4 EKF2 | 35.61 ± 12.25 | 5.46 ± 1.65 | 8.48 ± 2.51 | 3.28 ± 0.71 |
 | Madgwick (default) | - | 10.85 ± 3.21 | 31.39 ± 7.94 | 18.16 ± 3.59 |
 | Madgwick (CV-tuned) | - | 6.82 ± 2.06 | 20.82 ± 6.87 | 11.75 ± 2.66 |
@@ -193,15 +193,15 @@ Detected inclination from the 6 s dwell vs the true field, and the declination e
 
 | fault | inclination error ° | declination error ° | learned declination ° | heading rms: true field | heading rms: detected | heading rms: detected + learning |
 |---|---|---|---|---|---|---|
-| none | -0.68 ± 0.63 | 3.11 ± 0.35 | 0.19 ± 5.11 | 4.50 ± 1.03 | 5.06 ± 1.23 | 9.99 ± 4.28 |
-| accel_bias_step | -0.68 ± 0.63 | 3.11 ± 0.35 | 3.32 ± 4.77 | 5.12 ± 1.28 | 4.76 ± 1.29 | 13.78 ± 5.53 |
-| gps_dropout | -0.67 ± 0.63 | 3.11 ± 0.35 | -0.93 ± 7.71 | 7.00 ± 2.19 | 9.26 ± 5.99 | 12.20 ± 5.25 |
-| gps_outliers | -0.68 ± 0.63 | 3.11 ± 0.35 | 0.66 ± 5.20 | 4.29 ± 0.92 | 5.32 ± 1.31 | 10.10 ± 4.34 |
-| gyro_bias_step | -0.67 ± 0.63 | 3.11 ± 0.35 | 0.27 ± 5.09 | 4.46 ± 0.99 | 5.28 ± 1.24 | 10.25 ± 4.02 |
-| gyro_drift | -0.67 ± 0.63 | 3.11 ± 0.35 | 0.46 ± 5.28 | 4.41 ± 0.97 | 5.35 ± 1.33 | 10.15 ± 4.46 |
-| imu_spikes | -0.68 ± 0.63 | 3.11 ± 0.35 | -0.68 ± 4.57 | 4.98 ± 1.06 | 5.49 ± 1.14 | 10.04 ± 4.32 |
-| mag_bias | -2.46 ± 2.27 | 3.11 ± 0.35 | 3.52 ± 7.71 | 9.19 ± 4.74 | 23.25 ± 12.60 | 29.63 ± 12.73 |
-| mag_interference | -0.67 ± 0.63 | 3.11 ± 0.35 | 2.55 ± 5.89 | 4.59 ± 1.09 | 5.49 ± 2.25 | 10.32 ± 5.07 |
+| none | -0.68 ± 0.63 | 3.11 ± 0.35 | 2.48 ± 1.31 | 4.78 ± 1.41 | 5.59 ± 1.67 | 4.35 ± 1.20 |
+| accel_bias_step | -0.68 ± 0.63 | 3.11 ± 0.35 | 2.05 ± 1.36 | 4.50 ± 1.18 | 5.76 ± 2.20 | 4.17 ± 1.08 |
+| gps_dropout | -0.67 ± 0.63 | 3.11 ± 0.35 | 3.59 ± 1.94 | 9.80 ± 3.39 | 16.27 ± 8.14 | 7.90 ± 2.44 |
+| gps_outliers | -0.68 ± 0.63 | 3.11 ± 0.35 | 2.44 ± 1.35 | 4.68 ± 1.32 | 5.03 ± 1.35 | 5.19 ± 2.31 |
+| gyro_bias_step | -0.67 ± 0.63 | 3.11 ± 0.35 | 2.84 ± 1.29 | 4.68 ± 1.32 | 5.94 ± 2.35 | 4.20 ± 1.24 |
+| gyro_drift | -0.67 ± 0.63 | 3.11 ± 0.35 | 2.53 ± 1.33 | 4.77 ± 1.37 | 5.98 ± 1.97 | 4.37 ± 1.21 |
+| imu_spikes | -0.68 ± 0.63 | 3.11 ± 0.35 | 2.67 ± 1.19 | 5.04 ± 1.37 | 5.30 ± 1.34 | 5.61 ± 1.68 |
+| mag_bias | -2.46 ± 2.27 | 3.11 ± 0.35 | 3.32 ± 4.65 | 8.76 ± 3.79 | 22.95 ± 12.32 | 22.76 ± 12.10 |
+| mag_interference | -0.67 ± 0.63 | 3.11 ± 0.35 | 2.57 ± 1.37 | 4.61 ± 1.37 | 5.44 ± 2.36 | 4.28 ± 1.17 |
 
 ## Caveats
 

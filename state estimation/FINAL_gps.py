@@ -161,6 +161,19 @@ STALL_COAST_TAU = 0.25  # s
 # else DECL_PRIOR_STD_DEG. It's a constant over a flight, so no process noise.
 LEARN_DECLINATION = os.environ.get("EKF_LEARN_DECL", "0") == "1"
 DECL_PRIOR_STD_DEG = float(os.environ.get("EKF_DECL_STD_DEG", "5"))
+# heading-only mag fusion, 2026-10-20 (testing/benchmark, REPORT.md). With the accel
+# correction off in flight, tilt is held only by GPS velocity (via F) and the mag. The field
+# dips ~63deg, so a full 3-axis mag update rotates TILT too, and a real mag is off by 1.5-2deg
+# (vs the 0.57deg R_mag assumes): it out-voted GPS and held tilt ~2deg off even with a perfect
+# IMU (PX4 stock x500: 2.2deg tilt, EKF2 0.13deg). Restricting the mag's attitude Jacobian to
+# rotation about world-up (H_att u u^T, u = up in body) lets it correct heading only:
+# 36 PX4 flights, tilt 2.20 -> 1.00deg (stock IMU) / 2.34 -> 1.51 (realistic), pos 0.22 ->
+# 0.07-0.09 m. MAG_LIVE_STD is closer to the mag's real error; 0.01 with heading-only made
+# hover heading wander (17deg). Live mode only - synthetic mode's mag is perfect and its
+# accel correction is on. EKF_MAG_3D=1 restores the old 3-axis fusion for comparison.
+MAG_HEADING_ONLY = os.environ.get("EKF_MAG_3D", "0") != "1"
+MAG_LIVE_STD = 0.03
+R_mag_live = np.diag([MAG_LIVE_STD**2] * 3)
 # delayed GPS fusion, 2026-10-02: history of predicted pos/vel kept this long, so a fix can
 # be compared with the state at the time it was MEASURED (now - gps_latency)
 GPS_HISTORY_S = 1.5
@@ -419,6 +432,8 @@ class DroneEKF:
         # 0.14/0.12/0.20deg rms attitude error with this, 4.7/1.5/9.0deg with it on.
         # Synthetic mode (sensors=None) keeps it - its simulated accel IS gravity-only.
         self.use_accel_correction = sensors is None
+        # same split for the mag - see MAG_HEADING_ONLY
+        self.mag_heading_only = MAG_HEADING_ONLY and sensors is not None
         self.R_accel_base = R_accel_base.copy()
         self.k = k
 
@@ -910,8 +925,14 @@ class DroneEKF:
             predicted_mag = rotate_by_quat(quat_conjugate(self.q), mag_ref)
             d_mag_d_rot = rotate_by_quat(quat_conjugate(self.q), np.array([-mag_ref[1], mag_ref[0], 0.0]))
             self.H_mag = update_H_mag(predicted_mag, self.H_mag, d_mag_d_rot)
+            R_m = R_mag
+            if self.mag_heading_only:
+                # keep only the part of an attitude correction that spins about world-up
+                u = rotate_by_quat(quat_conjugate(self.q), np.array([0.0, 0.0, 1.0]))
+                self.H_mag[0:3, 0:3] = self.H_mag[0:3, 0:3] @ np.outer(u, u)
+                R_m = R_mag_live
 
-            S_mag = self.H_mag @ self.P @ self.H_mag.T + R_mag
+            S_mag = self.H_mag @ self.P @ self.H_mag.T + R_m
             K_mag = self.P @ self.H_mag.T @ np.linalg.inv(S_mag)
             residual_mag = np.array([corrected_mag_x, corrected_mag_y, corrected_mag_z]) - predicted_mag
             #gate against magnetic interference (motors/ESCs) - R_mag is static, not
@@ -932,7 +953,7 @@ class DroneEKF:
                         self.P[0:3, 0:3] += np.eye(3) * MAG_RESET_STD ** 2
                         self.stats["mag_resets"] += 1
                         # re-run this tick's mag update against the re-opened P
-                        S_mag = self.H_mag @ self.P @ self.H_mag.T + R_mag
+                        S_mag = self.H_mag @ self.P @ self.H_mag.T + R_m
                         K_mag = self.P @ self.H_mag.T @ np.linalg.inv(S_mag)
                         d_squared_mag = residual_mag.T @ np.linalg.inv(S_mag) @ residual_mag
                     self.mag_rejections = 0
@@ -942,7 +963,7 @@ class DroneEKF:
             if d_squared_mag <= chi2_threshold:
                 self.apply_correction(K_mag @ residual_mag)
                 #this is the second p update, after we incorporate a measuremnt uncertainty goes down bc that is another measurement source
-                self.P = (I - K_mag @ self.H_mag) @ self.P @ (I - K_mag @ self.H_mag).T + K_mag @ R_mag @ K_mag.T
+                self.P = (I - K_mag @ self.H_mag) @ self.P @ (I - K_mag @ self.H_mag).T + K_mag @ R_m @ K_mag.T
             #else: skip entirely - state and P stay exactly as the predict step left them
 
         #loop timing

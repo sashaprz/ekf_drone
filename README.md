@@ -21,6 +21,22 @@ I built a state estimator (EKF) and a flight controller (PID) from scratch, and 
 
 Left: with a gyro bias 10x larger than normal, the EKF's orientation error is 17x smaller than a basic complementary filter's ([section 1](#1-an-ekf-that-estimates-gyro-bias-not-a-complementary-filter)). Right: adding GPS keeps the position estimate on track, where the accelerometer alone drifts away ([section 4](#4-add-gps-so-the-drone-knows-where-it-is-gpspy-test_gps_trackingpy)).
 
+**Head-to-head with PX4's EKF2: my EKF's position error is 2.2x smaller and its velocity error 1.5x smaller. Tilt and heading are a tie.** The comparison ran over 162 flights flown by PX4 itself, not by my stack. They covered 6 flight profiles from hover to 5 m/s figure-8s, on a hobby-grade IMU, with 9 injected faults, 3 trials each. EKF2's numbers come from PX4's own replay of the same logs. Madgwick and Mahony were scored on the same logs too ([`testing/benchmark`](testing/benchmark/README.md), full report in [`REPORT.md`](testing/results/benchmark_v2/REPORT.md)).
+
+| EKF2 error ÷ my error (95% CI) | Tilt | Heading | Position | Velocity |
+|---|---|---|---|---|
+| Ratio (> 1 means mine is better) | 1.07 [0.86, 1.33] | 1.06 [0.72, 1.58] | **2.21 [2.00, 2.45]** | **1.54 [1.34, 1.81]** |
+| Flights where mine wins | 56% | 52% | 91% | 87% |
+
+Over the 144 fault runs my EKF lost track 0 times. Its tilt error is 1.8–2.8x smaller than Madgwick's or Mahony's. Two changes got it here:
+- **Heading-only magnetometer fusion.** The mag now corrects only heading and no longer pulls on roll/pitch. Before this, EKF2 had the better tilt (ratio 0.84) and position was a tie (0.97).
+- **Fixes to the simulator's GPS timing and its magnetometer under tilt** (gotchas in the benchmark README). With those fixed, learning the magnetic declination in flight works: it recovers 2.5° of a true 3.1° error.
+
+Where EKF2 still wins:
+- **On a near-perfect IMU,** EKF2's tilt is better (0.13° vs 1.0°).
+- **During a 15 s GPS dropout** my tilt drifts to 20° while EKF2's stays at 5.5°. Without GPS, nothing in my filter corrects tilt any more.
+- **In fast turns** my heading error is about 7°, against EKF2's 3–4°.
+
 ## The estimator: design decisions and test results
 
 The estimator takes readings from five sensors (gyroscope, accelerometer, magnetometer, GPS and barometer) and blends them into one best guess of which way the drone is pointing, how fast it's moving and where it is. It uses past data to learn how far off each sensor is (its bias) and subtracts that out, and it throws away any reading too far from what it expected to be real.
