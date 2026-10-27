@@ -2,7 +2,7 @@
 
 All flights flown by **PX4 itself** in Gazebo SITL (none of this project's code in the loop); every filter sees the identical sensor stream (EKF2 via PX4's own replay of the same - possibly fault-injected - log). Truth = Gazebo ground truth. Method details: `testing/benchmark/score.py` docstring; setup: `testing/benchmark/README.md`.
 
-**180 runs** from **36 flights** (box, circle_fast, figure8, hover, stops, yaw_spin; trials: [1, 2, 3]). Values: mean ± 95% CI over trials.
+**216 runs** from **36 flights** (box, circle_fast, figure8, hover, stops, yaw_spin; trials: [1, 2, 3]). Values: mean ± 95% CI over trials.
 
 CV-tuned gains chosen (per held-out trial): madgwick t1: `{"beta": 0.05, "zeta": 0.002}`; madgwick t2: `{"beta": 0.02, "zeta": 0.002}`; madgwick t3: `{"beta": 0.05, "zeta": 0.002}`; mahony t1: `{"ki": 0.01, "kp": 0.5}`; mahony t2: `{"ki": 0.05, "kp": 0.5}`; mahony t3: `{"ki": 0.01, "kp": 0.5}`
 
@@ -10,52 +10,82 @@ CV-tuned gains chosen (per held-out trial): madgwick t1: `{"beta": 0.05, "zeta":
 
 ### Stock x500 IMU (near-ideal), no fault  (18 runs)
 
-| filter | tilt rms ° | tilt max ° | heading rms ° | heading rms, offset removed ° | pos h rms m | vel rms m/s | lost |
-|---|---|---|---|---|---|---|---|
-| **your EKF** | 1.00 ± 0.28 | 3.00 ± 0.90 | 4.86 ± 1.32 | 4.19 ± 1.23 | 0.073 ± 0.012 | 0.100 ± 0.029 | 0/18 |
-| your EKF, detected field | 1.01 ± 0.32 | 3.44 ± 1.38 | 4.91 ± 1.31 | 3.80 ± 1.28 | 0.073 ± 0.012 | 0.102 ± 0.032 | 0/18 |
-| your EKF, detected field + decl. learning | 0.73 ± 0.19 | 2.46 ± 0.92 | 3.88 ± 1.03 | 3.48 ± 0.91 | 0.074 ± 0.012 | 0.089 ± 0.024 | 0/18 |
-| PX4 EKF2 | 0.13 ± 0.04 | 0.90 ± 0.35 | 2.06 ± 0.82 | 1.05 ± 0.42 | 0.061 ± 0.014 | 0.078 ± 0.020 | 0/18 |
-| Madgwick (default) | 4.35 ± 1.53 | 9.92 ± 3.04 | 6.03 ± 2.46 | 4.67 ± 1.69 | - | - | 0/18 |
-| Madgwick (CV-tuned) | 3.49 ± 1.44 | 7.58 ± 2.82 | 4.57 ± 1.91 | 3.10 ± 1.12 | - | - | 0/18 |
-| Mahony (default) | 3.86 ± 1.13 | 7.87 ± 2.31 | 3.94 ± 1.80 | 2.84 ± 0.81 | - | - | 0/18 |
-| Mahony (CV-tuned) | 4.36 ± 1.48 | 8.79 ± 2.86 | 4.21 ± 1.21 | 3.46 ± 0.88 | - | - | 0/18 |
+| filter | tilt rms ° | tilt max ° | heading rms ° | heading rms, offset removed ° | pos h rms m | pos v rms m | vel rms m/s | lost |
+|---|---|---|---|---|---|---|---|---|
+| **your EKF** | 1.00 ± 0.28 | 3.00 ± 0.90 | 4.86 ± 1.32 | 4.19 ± 1.23 | 0.073 ± 0.012 | 0.304 ± 0.086 | 0.100 ± 0.029 | 0/18 |
+| your EKF, detected field | 1.01 ± 0.32 | 3.44 ± 1.38 | 4.91 ± 1.31 | 3.80 ± 1.28 | 0.073 ± 0.012 | 0.303 ± 0.086 | 0.102 ± 0.032 | 0/18 |
+| your EKF, detected field + decl. learning | 0.73 ± 0.19 | 2.46 ± 0.92 | 3.88 ± 1.03 | 3.48 ± 0.91 | 0.074 ± 0.012 | 0.305 ± 0.086 | 0.089 ± 0.024 | 0/18 |
+| PX4 EKF2 | 0.13 ± 0.04 | 0.90 ± 0.35 | 2.06 ± 0.82 | 1.05 ± 0.42 | 0.061 ± 0.014 | 0.043 ± 0.014 | 0.078 ± 0.020 | 0/18 |
+| Madgwick (default) | 4.35 ± 1.53 | 9.92 ± 3.04 | 6.03 ± 2.46 | 4.67 ± 1.69 | - | - | - | 0/18 |
+| Madgwick (CV-tuned) | 3.49 ± 1.44 | 7.58 ± 2.82 | 4.57 ± 1.91 | 3.10 ± 1.12 | - | - | - | 0/18 |
+| Mahony (default) | 3.86 ± 1.13 | 7.87 ± 2.31 | 3.94 ± 1.80 | 2.84 ± 0.81 | - | - | - | 0/18 |
+| Mahony (CV-tuned) | 4.36 ± 1.48 | 8.79 ± 2.86 | 4.21 ± 1.21 | 3.46 ± 0.88 | - | - | - | 0/18 |
 
 (mean ± CI here is over all runs in the group, not over trials)
 
 ### Realistic IMU, no fault  (18 runs)
 
-| filter | tilt rms ° | tilt max ° | heading rms ° | heading rms, offset removed ° | pos h rms m | vel rms m/s | lost |
-|---|---|---|---|---|---|---|---|
-| **your EKF** | 1.51 ± 0.30 | 4.30 ± 1.37 | 4.78 ± 1.41 | 3.96 ± 1.36 | 0.085 ± 0.015 | 0.239 ± 0.086 | 0/18 |
-| your EKF, detected field | 1.57 ± 0.36 | 5.16 ± 1.94 | 5.59 ± 1.67 | 4.37 ± 1.67 | 0.088 ± 0.017 | 0.247 ± 0.087 | 0/18 |
-| your EKF, detected field + decl. learning | 1.39 ± 0.29 | 4.38 ± 1.98 | 4.35 ± 1.20 | 3.55 ± 1.22 | 0.085 ± 0.016 | 0.234 ± 0.087 | 0/18 |
-| PX4 EKF2 | 1.54 ± 0.19 | 3.81 ± 1.01 | 4.14 ± 1.47 | 2.97 ± 0.62 | 0.184 ± 0.018 | 0.347 ± 0.066 | 0/18 |
-| Madgwick (default) | 5.12 ± 1.62 | 12.28 ± 3.66 | 7.06 ± 3.48 | 5.11 ± 1.99 | - | - | 0/18 |
-| Madgwick (CV-tuned) | 3.53 ± 1.14 | 8.20 ± 2.62 | 4.66 ± 1.73 | 3.13 ± 0.91 | - | - | 0/18 |
-| Mahony (default) | 5.19 ± 1.50 | 12.24 ± 5.33 | 8.99 ± 3.31 | 4.13 ± 1.41 | - | - | 2/18 |
-| Mahony (CV-tuned) | 5.05 ± 1.55 | 11.61 ± 4.94 | 6.35 ± 2.07 | 3.99 ± 0.97 | - | - | 1/18 |
+| filter | tilt rms ° | tilt max ° | heading rms ° | heading rms, offset removed ° | pos h rms m | pos v rms m | vel rms m/s | lost |
+|---|---|---|---|---|---|---|---|---|
+| **your EKF** | 1.51 ± 0.30 | 4.30 ± 1.37 | 4.78 ± 1.41 | 3.96 ± 1.36 | 0.085 ± 0.015 | 0.305 ± 0.073 | 0.239 ± 0.086 | 0/18 |
+| your EKF, detected field | 1.57 ± 0.36 | 5.16 ± 1.94 | 5.59 ± 1.67 | 4.37 ± 1.67 | 0.088 ± 0.017 | 0.304 ± 0.070 | 0.247 ± 0.087 | 0/18 |
+| your EKF, detected field + decl. learning | 1.39 ± 0.29 | 4.38 ± 1.98 | 4.35 ± 1.20 | 3.55 ± 1.22 | 0.085 ± 0.016 | 0.306 ± 0.072 | 0.234 ± 0.087 | 0/18 |
+| PX4 EKF2 | 1.54 ± 0.19 | 3.81 ± 1.01 | 4.14 ± 1.47 | 2.97 ± 0.62 | 0.184 ± 0.018 | 0.176 ± 0.027 | 0.347 ± 0.066 | 0/18 |
+| Madgwick (default) | 5.12 ± 1.62 | 12.28 ± 3.66 | 7.06 ± 3.48 | 5.11 ± 1.99 | - | - | - | 0/18 |
+| Madgwick (CV-tuned) | 3.53 ± 1.14 | 8.20 ± 2.62 | 4.66 ± 1.73 | 3.13 ± 0.91 | - | - | - | 0/18 |
+| Mahony (default) | 5.19 ± 1.50 | 12.24 ± 5.33 | 8.99 ± 3.31 | 4.13 ± 1.41 | - | - | - | 2/18 |
+| Mahony (CV-tuned) | 5.05 ± 1.55 | 11.61 ± 4.94 | 6.35 ± 2.07 | 3.99 ± 0.97 | - | - | - | 1/18 |
 
 (mean ± CI here is over all runs in the group, not over trials)
 
 ### Realistic IMU, all 8 faults pooled  (144 runs)
 
-| filter | tilt rms ° | tilt max ° | heading rms ° | heading rms, offset removed ° | pos h rms m | vel rms m/s | lost |
-|---|---|---|---|---|---|---|---|
-| **your EKF** | 2.02 ± 0.28 | 7.41 ± 1.40 | 5.86 ± 0.81 | 5.00 ± 0.76 | 1.751 ± 0.843 | 0.558 ± 0.162 | 0/144 |
-| your EKF, detected field | 2.31 ± 0.36 | 9.38 ± 1.85 | 9.08 ± 2.16 | 7.42 ± 1.86 | 1.759 ± 0.811 | 0.578 ± 0.157 | 10/144 |
-| your EKF, detected field + decl. learning | 1.93 ± 0.24 | 7.68 ± 1.56 | 7.31 ± 1.85 | 6.10 ± 1.57 | 1.588 ± 0.752 | 0.527 ± 0.141 | 4/144 |
-| PX4 EKF2 | 1.92 ± 0.12 | 5.45 ± 0.66 | 6.31 ± 1.02 | 4.29 ± 0.50 | 1.288 ± 0.590 | 0.568 ± 0.104 | 2/144 |
-| Madgwick (default) | 5.33 ± 0.56 | 13.24 ± 1.33 | 8.39 ± 1.28 | 6.03 ± 0.76 | - | - | 1/144 |
-| Madgwick (CV-tuned) | 3.93 ± 0.45 | 9.30 ± 1.06 | 6.30 ± 0.93 | 4.04 ± 0.53 | - | - | 2/144 |
-| Mahony (default) | 5.64 ± 0.53 | 13.49 ± 1.93 | 10.71 ± 1.31 | 4.94 ± 0.56 | - | - | 19/144 |
-| Mahony (CV-tuned) | 5.44 ± 0.55 | 12.68 ± 1.78 | 8.08 ± 0.94 | 4.89 ± 0.50 | - | - | 8/144 |
+| filter | tilt rms ° | tilt max ° | heading rms ° | heading rms, offset removed ° | pos h rms m | pos v rms m | vel rms m/s | lost |
+|---|---|---|---|---|---|---|---|---|
+| **your EKF** | 2.02 ± 0.28 | 7.41 ± 1.40 | 5.86 ± 0.81 | 5.00 ± 0.76 | 1.751 ± 0.843 | 0.318 ± 0.025 | 0.558 ± 0.162 | 0/144 |
+| your EKF, detected field | 2.31 ± 0.36 | 9.38 ± 1.85 | 9.08 ± 2.16 | 7.42 ± 1.86 | 1.759 ± 0.811 | 0.315 ± 0.024 | 0.578 ± 0.157 | 10/144 |
+| your EKF, detected field + decl. learning | 1.93 ± 0.24 | 7.68 ± 1.56 | 7.31 ± 1.85 | 6.10 ± 1.57 | 1.588 ± 0.752 | 0.317 ± 0.024 | 0.527 ± 0.141 | 4/144 |
+| PX4 EKF2 | 1.92 ± 0.12 | 5.45 ± 0.66 | 6.31 ± 1.02 | 4.29 ± 0.50 | 1.288 ± 0.590 | 0.213 ± 0.023 | 0.568 ± 0.104 | 2/144 |
+| Madgwick (default) | 5.33 ± 0.56 | 13.24 ± 1.33 | 8.39 ± 1.28 | 6.03 ± 0.76 | - | - | - | 1/144 |
+| Madgwick (CV-tuned) | 3.93 ± 0.45 | 9.30 ± 1.06 | 6.30 ± 0.93 | 4.04 ± 0.53 | - | - | - | 2/144 |
+| Mahony (default) | 5.64 ± 0.53 | 13.49 ± 1.93 | 10.71 ± 1.31 | 4.94 ± 0.56 | - | - | - | 19/144 |
+| Mahony (CV-tuned) | 5.44 ± 0.55 | 12.68 ± 1.78 | 8.08 ± 0.94 | 4.89 ± 0.50 | - | - | - | 8/144 |
+
+(mean ± CI here is over all runs in the group, not over trials)
+
+### Stock x500 IMU, realistic GPS  (18 runs)
+
+| filter | tilt rms ° | tilt max ° | heading rms ° | heading rms, offset removed ° | pos h rms m | pos v rms m | vel rms m/s | lost |
+|---|---|---|---|---|---|---|---|---|
+| **your EKF** | 1.46 ± 0.19 | 4.43 ± 0.94 | 5.09 ± 1.29 | 4.51 ± 1.24 | 0.833 ± 0.105 | 0.323 ± 0.092 | 0.195 ± 0.016 | 0/18 |
+| your EKF, detected field | 1.50 ± 0.25 | 5.14 ± 1.34 | 5.08 ± 1.20 | 4.07 ± 1.18 | 0.837 ± 0.103 | 0.324 ± 0.091 | 0.200 ± 0.023 | 0/18 |
+| your EKF, detected field + decl. learning | 1.30 ± 0.14 | 4.56 ± 1.05 | 8.10 ± 2.58 | 5.94 ± 1.27 | 0.833 ± 0.105 | 0.324 ± 0.092 | 0.189 ± 0.013 | 1/18 |
+| PX4 EKF2 | 0.33 ± 0.09 | 2.49 ± 1.20 | 4.90 ± 1.58 | 2.96 ± 0.99 | 0.876 ± 0.138 | 0.857 ± 0.149 | 0.159 ± 0.013 | 0/18 |
+| Madgwick (default) | 4.35 ± 1.53 | 9.90 ± 3.05 | 6.03 ± 2.46 | 4.66 ± 1.69 | - | - | - | 0/18 |
+| Madgwick (CV-tuned) | 3.49 ± 1.44 | 7.57 ± 2.82 | 4.57 ± 1.92 | 3.10 ± 1.12 | - | - | - | 0/18 |
+| Mahony (default) | 3.86 ± 1.13 | 7.87 ± 2.31 | 3.93 ± 1.79 | 2.84 ± 0.81 | - | - | - | 0/18 |
+| Mahony (CV-tuned) | 4.36 ± 1.48 | 8.79 ± 2.86 | 4.22 ± 1.22 | 3.46 ± 0.88 | - | - | - | 0/18 |
+
+(mean ± CI here is over all runs in the group, not over trials)
+
+### Realistic IMU, realistic GPS  (18 runs)
+
+| filter | tilt rms ° | tilt max ° | heading rms ° | heading rms, offset removed ° | pos h rms m | pos v rms m | vel rms m/s | lost |
+|---|---|---|---|---|---|---|---|---|
+| **your EKF** | 1.86 ± 0.27 | 6.22 ± 2.15 | 5.03 ± 1.30 | 4.26 ± 1.20 | 0.827 ± 0.124 | 0.363 ± 0.084 | 0.291 ± 0.065 | 0/18 |
+| your EKF, detected field | 2.38 ± 1.09 | 9.25 ± 5.53 | 5.77 ± 1.75 | 4.58 ± 1.60 | 0.844 ± 0.128 | 0.367 ± 0.082 | 0.338 ± 0.117 | 0/18 |
+| your EKF, detected field + decl. learning | 1.76 ± 0.27 | 6.08 ± 2.50 | 6.48 ± 1.56 | 5.18 ± 1.57 | 0.828 ± 0.124 | 0.358 ± 0.083 | 0.287 ± 0.064 | 0/18 |
+| PX4 EKF2 | 1.56 ± 0.21 | 3.90 ± 1.15 | 3.99 ± 1.25 | 2.96 ± 0.66 | 0.924 ± 0.179 | 1.010 ± 0.249 | 0.375 ± 0.066 | 0/18 |
+| Madgwick (default) | 5.10 ± 1.61 | 12.21 ± 3.63 | 6.97 ± 3.45 | 5.07 ± 1.96 | - | - | - | 0/18 |
+| Madgwick (CV-tuned) | 3.53 ± 1.13 | 8.21 ± 2.62 | 4.66 ± 1.73 | 3.14 ± 0.92 | - | - | - | 0/18 |
+| Mahony (default) | 5.19 ± 1.48 | 12.25 ± 5.28 | 9.14 ± 3.24 | 4.12 ± 1.40 | - | - | - | 2/18 |
+| Mahony (CV-tuned) | 5.04 ± 1.54 | 11.59 ± 4.94 | 6.41 ± 2.05 | 4.02 ± 0.98 | - | - | - | 1/18 |
 
 (mean ± CI here is over all runs in the group, not over trials)
 
 ## 2. Paired comparison against your EKF (realistic IMU, all conditions)
 
-Ratio = other filter's error / your EKF's error on the *same run*, geometric mean, 95% CI by resampling flights. > 1 means your EKF is better. 'EKF better' = share of runs where yours had the lower error. All runs with numbers included.
+Ratio = other filter's error / your EKF's error on the *same run*, geometric mean, 95% CI by resampling flights. > 1 means your EKF is better. 'EKF better' = share of runs where yours had the lower error. All runs with numbers included. Gazebo's GPS is within ~4 cm of truth - far better than any real receiver - so position and velocity here mostly measure how closely a filter follows GPS; see 2b for the realistic-GPS comparison.
 
 | vs | metric | ratio [95% CI] | EKF better | runs |
 |---|---|---|---|---|
@@ -63,16 +93,19 @@ Ratio = other filter's error / your EKF's error on the *same run*, geometric mea
 | your EKF, detected field | heading rms | 1.26 [0.98, 1.68] | 60% | 162 |
 | your EKF, detected field | heading (offset removed) | 1.11 [0.91, 1.37] | 48% | 162 |
 | your EKF, detected field | pos h rms | 1.06 [1.02, 1.10] | 53% | 162 |
+| your EKF, detected field | pos v rms | 0.99 [0.98, 1.01] | 46% | 162 |
 | your EKF, detected field | vel rms | 1.06 [1.01, 1.12] | 45% | 162 |
 | your EKF, detected field + decl. learning | tilt rms | 0.95 [0.88, 1.03] | 33% | 162 |
 | your EKF, detected field + decl. learning | heading rms | 1.06 [0.83, 1.40] | 50% | 162 |
 | your EKF, detected field + decl. learning | heading (offset removed) | 1.01 [0.84, 1.23] | 49% | 162 |
 | your EKF, detected field + decl. learning | pos h rms | 1.02 [0.98, 1.06] | 56% | 162 |
+| your EKF, detected field + decl. learning | pos v rms | 1.00 [0.99, 1.01] | 45% | 162 |
 | your EKF, detected field + decl. learning | vel rms | 1.00 [0.95, 1.05] | 31% | 162 |
 | PX4 EKF2 | tilt rms | 1.07 [0.86, 1.33] | 56% | 162 |
 | PX4 EKF2 | heading rms | 1.06 [0.72, 1.58] | 52% | 162 |
 | PX4 EKF2 | heading (offset removed) | 0.99 [0.69, 1.39] | 57% | 162 |
 | PX4 EKF2 | pos h rms | 2.21 [2.00, 2.45] | 91% | 162 |
+| PX4 EKF2 | pos v rms | 0.66 [0.50, 0.88] | 29% | 162 |
 | PX4 EKF2 | vel rms | 1.54 [1.34, 1.81] | 87% | 162 |
 | Madgwick (default) | tilt rms | 2.40 [1.83, 3.14] | 87% | 162 |
 | Madgwick (default) | heading rms | 1.28 [0.96, 1.81] | 62% | 162 |
@@ -86,6 +119,19 @@ Ratio = other filter's error / your EKF's error on the *same run*, geometric mea
 | Mahony (CV-tuned) | tilt rms | 2.60 [2.08, 3.22] | 90% | 162 |
 | Mahony (CV-tuned) | heading rms | 1.42 [1.07, 1.91] | 62% | 162 |
 | Mahony (CV-tuned) | heading (offset removed) | 1.13 [0.87, 1.49] | 52% | 162 |
+
+### 2b. Realistic GPS (both IMUs, no fault)
+
+Same flights, with consumer-GPS error added to every fix to match the accuracy the fixes report (eph 0.9 m, epv 1.8 m): slow wander of 0.7 m per horizontal axis / 1.4 m vertical (τ 60 s) plus fast noise (ulog_faults.py gps_realistic). This is the fair position/velocity comparison.
+
+| vs | metric | ratio [95% CI] | EKF better | runs |
+|---|---|---|---|---|
+| PX4 EKF2 | tilt rms | 0.41 [0.32, 0.54] | 17% | 36 |
+| PX4 EKF2 | heading rms | 0.82 [0.62, 1.08] | 39% | 36 |
+| PX4 EKF2 | heading (offset removed) | 0.66 [0.52, 0.83] | 31% | 36 |
+| PX4 EKF2 | pos h rms | 1.07 [0.95, 1.19] | 56% | 36 |
+| PX4 EKF2 | pos v rms | 2.97 [2.45, 3.61] | 100% | 36 |
+| PX4 EKF2 | vel rms | 1.03 [0.95, 1.14] | 44% | 36 |
 
 ## 3. Per scenario (realistic IMU, no fault) - mean ± 95% CI over trials
 

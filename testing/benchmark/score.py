@@ -63,6 +63,8 @@ LABEL = {"ekf": "**your EKF**", "ekf_detect": "your EKF, detected field", "ekf_d
          "ekf2": "PX4 EKF2", "madgwick": "Madgwick (default)", "madgwick_cv": "Madgwick (CV-tuned)",
          "mahony": "Mahony (default)", "mahony_cv": "Mahony (CV-tuned)"}
 FAULT_WINDOWS = {"gps_dropout": (25.0, 40.0), "mag_interference": (20.0, 30.0)}  # s after takeoff (ulog_faults.py)
+# conditions that aren't faults: reported on their own, kept out of the fault pool
+NOT_FAULTS = ("none", "gps_realistic")
 LOST = {"end_tilt": 10.0, "end_yaw": 30.0, "end_pos_h": 10.0}
 
 
@@ -226,7 +228,9 @@ def cv_select(runs):
     for kind in ("madgwick", "mahony"):
         keys = [k for k in next(iter(runs.values()))["ahrs"] if k.startswith(kind + "|")]
         for k_test in trials:
-            train = [r for r in runs.values() if r["info"]["trial"] != k_test] or list(runs.values())
+            # gps_realistic repeats the 'none' flights' IMU/mag data - don't count them twice
+            train = [r for r in runs.values() if r["info"]["trial"] != k_test and r["info"]["fault"] != "gps_realistic"] \
+                or list(runs.values())
 
             def obj(key):
                 v = [r["ahrs"][key] for r in train]
@@ -290,7 +294,9 @@ def report(runs, chosen, out_dir):
     L += ["## 1. Headline", ""]
     groups = [("Stock x500 IMU (near-ideal), no fault", sel(model="x500", fault="none")),
               ("Realistic IMU, no fault", sel(model="x500_bench", fault="none")),
-              ("Realistic IMU, all 8 faults pooled", [r for r in sel(model="x500_bench") if r["info"]["fault"] != "none"])]
+              ("Realistic IMU, all 8 faults pooled", [r for r in sel(model="x500_bench") if r["info"]["fault"] not in NOT_FAULTS]),
+              ("Stock x500 IMU, realistic GPS", sel(model="x500", fault="gps_realistic")),
+              ("Realistic IMU, realistic GPS", sel(model="x500_bench", fault="gps_realistic"))]
     for title, rs in groups:
         if not rs:
             continue
@@ -302,28 +308,40 @@ def report(runs, chosen, out_dir):
             rows.append([LABEL[f], fmt_ci([m["tilt_rms"] for m in ok]), fmt_ci([m["tilt_max"] for m in ok]),
                          fmt_ci([m["yaw_rms"] for m in ok]), fmt_ci([m["yaw_rms_offset_removed"] for m in ok]),
                          fmt_ci([m.get("pos_h_rms") for m in ok], 3) if f in POS_FILTERS else "-",
+                         fmt_ci([m.get("pos_v_rms") for m in ok], 3) if f in POS_FILTERS else "-",
                          fmt_ci([m.get("vel_rms") for m in ok], 3) if f in POS_FILTERS else "-",
                          f"{sum(lost(m) for m in ms)}/{len(ms)}"])
         L += table(rows, ["filter", "tilt rms °", "tilt max °", "heading rms °", "heading rms, offset removed °",
-                          "pos h rms m", "vel rms m/s", "lost"]) + [""]
+                          "pos h rms m", "pos v rms m", "vel rms m/s", "lost"]) + [""]
         L += ["(mean ± CI here is over all runs in the group, not over trials)", ""]
 
     # 2. paired comparison
+    def paired(rs, others):
+        rows = []
+        for other in others:
+            for key, lab in (("tilt_rms", "tilt rms"), ("yaw_rms", "heading rms"), ("yaw_rms_offset_removed", "heading (offset removed)"),
+                             ("pos_h_rms", "pos h rms"), ("pos_v_rms", "pos v rms"), ("vel_rms", "vel rms")):
+                if key in ("pos_h_rms", "pos_v_rms", "vel_rms") and other not in POS_FILTERS:
+                    continue
+                b = boot_ratio(rs, other, key)
+                if b:
+                    rows.append([LABEL[other], lab, f"{b['ratio']:.2f} [{b['lo']:.2f}, {b['hi']:.2f}]", f"{100 * b['ekf_wins']:.0f}%", str(b["n"])])
+        return table(rows, ["vs", "metric", "ratio [95% CI]", "EKF better", "runs"]) + [""]
+
     L += ["## 2. Paired comparison against your EKF (realistic IMU, all conditions)", "",
           "Ratio = other filter's error / your EKF's error on the *same run*, geometric mean, 95% CI by resampling flights. "
           "> 1 means your EKF is better. 'EKF better' = share of runs where yours had the lower error. All runs with numbers "
-          "included.", ""]
-    rb = sel(model="x500_bench")
-    rows = []
-    for other in FILTERS[1:]:
-        for key, lab in (("tilt_rms", "tilt rms"), ("yaw_rms", "heading rms"), ("yaw_rms_offset_removed", "heading (offset removed)"),
-                         ("pos_h_rms", "pos h rms"), ("vel_rms", "vel rms")):
-            if key in ("pos_h_rms", "vel_rms") and other not in POS_FILTERS:
-                continue
-            b = boot_ratio(rb, other, key)
-            if b:
-                rows.append([LABEL[other], lab, f"{b['ratio']:.2f} [{b['lo']:.2f}, {b['hi']:.2f}]", f"{100 * b['ekf_wins']:.0f}%", str(b["n"])])
-    L += table(rows, ["vs", "metric", "ratio [95% CI]", "EKF better", "runs"]) + [""]
+          "included. Gazebo's GPS is within ~4 cm of truth - far better than any real receiver - so position and velocity "
+          "here mostly measure how closely a filter follows GPS; see 2b for the realistic-GPS comparison.", ""]
+    rb = [r for r in sel(model="x500_bench") if r["info"]["fault"] != "gps_realistic"]
+    L += paired(rb, FILTERS[1:])
+    rg = sel(fault="gps_realistic")
+    if rg:
+        L += ["### 2b. Realistic GPS (both IMUs, no fault)", "",
+              "Same flights, with consumer-GPS error added to every fix to match the accuracy the fixes report (eph 0.9 m, "
+              "epv 1.8 m): slow wander of 0.7 m per horizontal axis / 1.4 m vertical (τ 60 s) plus fast noise "
+              "(ulog_faults.py gps_realistic). This is the fair position/velocity comparison.", ""]
+        L += paired(rg, ["ekf2"])
 
     # 3. per scenario
     L += ["## 3. Per scenario (realistic IMU, no fault) - mean ± 95% CI over trials", ""]
@@ -337,7 +355,7 @@ def report(runs, chosen, out_dir):
 
     # 4. per fault
     L += ["## 4. Per fault (realistic IMU, all scenarios pooled) - mean ± 95% CI over the 18 flights", ""]
-    faults = sorted({r["info"]["fault"] for r in rb}, key=lambda f: (f != "none", f))
+    faults = sorted({r["info"]["fault"] for r in rb if r["info"]["fault"] != "gps_realistic"}, key=lambda f: (f != "none", f))
     for key, lab, fs in (("tilt_rms", "tilt rms °", FILTERS), ("tilt_max", "tilt max °", FILTERS),
                          ("yaw_rms", "heading rms °", FILTERS), ("pos_h_rms", "pos h rms m", list(POS_FILTERS))):
         rows = []

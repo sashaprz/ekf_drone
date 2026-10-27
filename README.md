@@ -21,21 +21,32 @@ I built a state estimator (EKF) and a flight controller (PID) from scratch, and 
 
 Left: with a gyro bias 10x larger than normal, the EKF's orientation error is 17x smaller than a basic complementary filter's ([section 1](#1-an-ekf-that-estimates-gyro-bias-not-a-complementary-filter)). Right: adding GPS keeps the position estimate on track, where the accelerometer alone drifts away ([section 4](#4-add-gps-so-the-drone-knows-where-it-is-gpspy-test_gps_trackingpy)).
 
-**Head-to-head with PX4's EKF2: my EKF's position error is 2.2x smaller and its velocity error 1.5x smaller. Tilt and heading are a tie.** The comparison ran over 162 flights flown by PX4 itself, not by my stack. They covered 6 flight profiles from hover to 5 m/s figure-8s, on a hobby-grade IMU, with 9 injected faults, 3 trials each. EKF2's numbers come from PX4's own replay of the same logs. Madgwick and Mahony were scored on the same logs too ([`testing/benchmark`](testing/benchmark/README.md), full report in [`REPORT.md`](testing/results/benchmark_v2/REPORT.md)).
+**Head-to-head with PX4's EKF2: on horizontal position and velocity my EKF is level with EKF2, and on altitude its error is 3x smaller. On tilt and heading, EKF2 is still clearly better.** Both filters read the same 36 flights. PX4 flew them itself, not my stack. They cover 6 flight profiles, from hover up to 5 m/s figure-8s, on a near-perfect IMU and on a hobby-grade one, with 3 trials each. EKF2's numbers come from PX4's own replay of the same logs ([`testing/benchmark`](testing/benchmark/README.md), full report in [`REPORT.md`](testing/results/benchmark_v2/REPORT.md)).
 
-| EKF2 error ÷ my error (95% CI) | Tilt | Heading | Position | Velocity |
-|---|---|---|---|---|
-| Ratio (> 1 means mine is better) | 1.07 [0.86, 1.33] | 1.06 [0.72, 1.58] | **2.21 [2.00, 2.45]** | **1.54 [1.34, 1.81]** |
-| Flights where mine wins | 56% | 52% | 91% | 87% |
+Gazebo's simulated GPS is within about 4 cm of the truth. Real consumer GPS wanders by a metre or so. In my first run of this benchmark on the raw simulator GPS, my EKF looked 2.2x better than EKF2 on position. That was an artefact: my EKF just tracks GPS more closely, which pays off only when the GPS is near-perfect. So these numbers add GPS error sized to the accuracy each fix reports: 0.9 m horizontal and 1.8 m vertical, wandering slowly, plus fast noise.
 
-Over the 144 fault runs my EKF lost track 0 times. Its tilt error is 1.8–2.8x smaller than Madgwick's or Mahony's. Two changes got it here:
-- **Heading-only magnetometer fusion.** The mag now corrects only heading and no longer pulls on roll/pitch. Before this, EKF2 had the better tilt (ratio 0.84) and position was a tie (0.97).
-- **Fixes to the simulator's GPS timing and its magnetometer under tilt** (gotchas in the benchmark README). With those fixed, learning the magnetic declination in flight works: it recovers 2.5° of a true 3.1° error.
+| EKF2 error ÷ my error (95% CI, 36 flights) | Tilt | Heading | Horizontal position | Altitude | Velocity |
+|---|---|---|---|---|---|
+| Ratio (> 1 means mine is better) | 0.41 [0.32, 0.54] | 0.82 [0.62, 1.08] | 1.07 [0.95, 1.19] | **2.97 [2.45, 3.61]** | 1.03 [0.95, 1.14] |
+| Flights where mine wins | 17% | 39% | 56% | 100% | 44% |
 
-Where EKF2 still wins:
-- **On a near-perfect IMU,** EKF2's tilt is better (0.13° vs 1.0°).
-- **During a 15 s GPS dropout** my tilt drifts to 20° while EKF2's stays at 5.5°. Without GPS, nothing in my filter corrects tilt any more.
-- **In fast turns** my heading error is about 7°, against EKF2's 3–4°.
+On the hobby-grade IMU with realistic GPS:
+
+| | Tilt rms | Heading rms | Horizontal position rms | Altitude rms | Velocity rms |
+|---|---|---|---|---|---|
+| My EKF | 1.86° | 5.03° | 0.83 m | 0.36 m | 0.29 m/s |
+| EKF2 | 1.56° | 3.99° | 0.92 m | 1.01 m | 0.38 m/s |
+
+What this means:
+- **Horizontal position and velocity:** level with EKF2. Neither filter can do much better than the GPS itself.
+- **Altitude:** clearly better. My EKF leans on the barometer, while EKF2 follows GPS height. This is probably flattered by the simulated barometer, which has none of the drift a real one picks up from temperature and wind.
+- **Tilt:** EKF2 wins, by a lot on a good IMU (0.33° vs 1.46°). Mine gets roll/pitch only from GPS velocity, so noisy GPS shows up directly as tilt error.
+- **Heading:** EKF2 is better, especially in fast turns.
+- **Faults:** across 9 injected faults (gyro/accel bias, GPS dropout and outliers, magnetometer bias and interference, IMU spikes), my EKF never lost track (0/144 runs). EKF2 lost track 2 times.
+- **GPS dropout:** during a 15 s dropout my tilt drifts to 20°, against EKF2's 5.5°.
+- **Against simpler filters:** my tilt error is 1.8–2.8x smaller than Madgwick's or Mahony's.
+
+Two changes got it this far. **Heading-only magnetometer fusion:** the mag corrects heading only and no longer pulls on roll/pitch. **Fixes to the simulator's GPS timing and to its magnetometer under tilt** (see the gotchas in the benchmark README). With those fixes, learning the magnetic declination in flight works: it recovers 2.5° of a true 3.1° error.
 
 ## The estimator: design decisions and test results
 

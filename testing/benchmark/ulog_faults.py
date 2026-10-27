@@ -15,6 +15,11 @@ Faults (magnitudes follow testing/suite/faults.py - "cheap hobby hardware"):
   mag_interference     10 s disturbance of 50 % of the field, fixed body direction, from
                        takeoff + 20 s (e.g. a current-carrying wire near the compass)
   imu_spikes           0.1 % of IMU samples hit by 5 rad/s gyro / 30 m/s^2 accel spikes, in flight
+  gps_realistic        not a fault: consumer-GPS error on every fix, whole log. Gazebo's GPS is within ~4 cm
+                       of truth, but the fixes report the accuracy of a real receiver (eph 0.9 m, epv 1.8 m,
+                       speed acc 0.4 m/s), so this adds error of that size: slow Gauss-Markov wander
+                       (tau 60 s; 0.7 m per horizontal axis, 1.4 m vertical, starting at 0 so home is
+                       unaffected) + fast noise (tau 1 s; 0.2 m / 0.4 m position, 0.1 / 0.15 m/s velocity)
 
 Field alignment (--align-field DECL,INCL, applied before any fault, for every condition):
   EKF2 always takes Earth's field from the World Magnetic Model at the GPS position
@@ -61,7 +66,7 @@ CODES = {"int8_t": "b", "uint8_t": "B", "bool": "?", "char": "c", "int16_t": "h"
          "int32_t": "i", "uint32_t": "I", "float": "f", "int64_t": "q", "uint64_t": "Q", "double": "d"}
 G = 9.80665
 FAULTS = ["none", "gyro_bias_step", "gyro_drift", "accel_bias_step", "gps_dropout", "gps_outliers",
-          "mag_bias", "mag_interference", "imu_spikes"]
+          "mag_bias", "mag_interference", "imu_spikes", "gps_realistic"]
 
 
 class ULogPatch:
@@ -206,6 +211,42 @@ def gps_arrival_stamp(u):
     return n
 
 
+def _gauss_markov(rng, t, sigma, tau, start_zero=False):
+    """(N, len(sigma)) first-order Gauss-Markov noise sampled at times t (s), stationary std sigma"""
+    sigma = np.asarray(sigma, float)
+    x = np.zeros((len(t), len(sigma)))
+    x[0] = 0.0 if start_zero else rng.normal(0, sigma)
+    for k in range(1, len(t)):
+        a = math.exp(-max(t[k] - t[k - 1], 0.0) / tau)
+        x[k] = a * x[k - 1] + math.sqrt(1 - a * a) * rng.normal(0, sigma)
+    return x
+
+
+def gps_realistic(u, topic, rng):
+    pos, ts = u.read(topic, "timestamp")
+    t = (ts[:, 0] - ts[0, 0]) * 1e-6
+    p_err = (_gauss_markov(rng, t, [0.7, 0.7, 1.4], 60.0, start_zero=True)
+             + _gauss_markov(rng, t, [0.2, 0.2, 0.4], 1.0))          # N, E, up (m)
+    v_err = _gauss_markov(rng, t, [0.1, 0.1, 0.15], 1.0)              # N, E, D (m/s)
+    _, lat = u.read(topic, "latitude_deg")
+    _, lon = u.read(topic, "longitude_deg")
+    lat0 = math.radians(lat[0, 0])
+    u.write(topic, "latitude_deg", pos, lat[:, 0] + np.degrees(p_err[:, 0] / 6371000.0))
+    u.write(topic, "longitude_deg", pos, lon[:, 0] + np.degrees(p_err[:, 1] / 6371000.0 / math.cos(lat0)))
+    for f in ("altitude_msl_m", "altitude_ellipsoid_m"):
+        try:
+            _, alt = u.read(topic, f)
+        except KeyError:
+            continue
+        u.write(topic, f, pos, alt[:, 0] + p_err[:, 2])
+    for j, f in enumerate(("vel_n_m_s", "vel_e_m_s", "vel_d_m_s")):
+        _, v = u.read(topic, f)
+        u.write(topic, f, pos, v[:, 0] + v_err[:, j])
+    return {"pos_err_h_rms_m": float(np.sqrt(np.mean(p_err[:, 0] ** 2 + p_err[:, 1] ** 2))),
+            "pos_err_v_rms_m": float(np.sqrt(np.mean(p_err[:, 2] ** 2))),
+            "vel_err_rms_m_s": float(np.sqrt(np.mean(np.sum(v_err ** 2, 1))))}
+
+
 def apply(u, fault, seed):
     rng = _rng(seed, fault)
     t_to = takeoff_time(u)
@@ -242,6 +283,12 @@ def apply(u, fault, seed):
             u.write("sensor_combined", "gyro_rad", pos, g)
             u.write("sensor_combined", "accelerometer_m_s2", pos, a)
             info["spikes"] = int(hit.sum())
+        return info
+
+    if fault == "gps_realistic":
+        # the topic EKF2 replay fuses and ulog_to_csv.py reads
+        topic = next(t for t in ("vehicle_gps_position", "sensor_gps") if u.instances(t))
+        info.update(gps_realistic(u, topic, rng))
         return info
 
     if fault in ("gps_dropout", "gps_outliers"):

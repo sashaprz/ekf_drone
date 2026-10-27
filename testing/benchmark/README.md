@@ -47,6 +47,13 @@ yaw_spin (60 °/s). The aggressive ones raise PX4's speed, acceleration and tilt
 the clean control): none, gyro_bias_step, gyro_drift, accel_bias_step, gps_dropout (15 s),
 gps_outliers, mag_bias, mag_interference, imu_spikes.
 
+**Realistic GPS** (`gps_realistic`, applied to both IMUs, scored separately from the faults): this is
+not a fault. Gazebo's GPS is within about 4 cm of truth, while each fix *reports* the accuracy of a
+real receiver (eph 0.9 m, epv 1.8 m). So this condition adds error of that size: Gauss-Markov wander
+(τ 60 s, 0.7 m per horizontal axis, 1.4 m vertical) plus fast noise. On the raw simulator GPS, a filter
+that follows GPS closely looks far better on position than it would on real hardware. Use this
+condition for the position and velocity comparison.
+
 ## Gotchas found while building this
 
 - PX4's replay reader is extremely slow on `/mnt/c`: more than 120 s, versus 8 s from the Linux
