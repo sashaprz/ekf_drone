@@ -317,6 +317,18 @@ class CalRecorder:
                 f.write(",".join(f"{v:.6f}" for v in (*g, *m, *a)) + "\n")
 
 
+def relative_setpoint(sp, origin):
+    # OFFBOARD: missions are written around (0,0) facing yaw 0; fly them from wherever the
+    # vehicle was (and whichever way it faced) when control was engaged
+    pos0, yaw0 = origin
+    c, s = math.cos(yaw0), math.sin(yaw0)
+    p = np.asarray(sp["pos"], float)
+    out = dict(sp)
+    out["pos"] = np.array([pos0[0] + c * p[0] - s * p[1], pos0[1] + s * p[0] + c * p[1], pos0[2] + p[2]])
+    out["yaw"] = yaw0 + sp["yaw"]
+    return out
+
+
 def main():
     bridge = GazeboBridge()
     time.sleep(0.5)  # let the first real gz-transport messages arrive before calibration reads them -
@@ -378,7 +390,20 @@ def main():
     # SIM_HANG_AT=s hangs this loop at s (watchdog), SIM_GPS_LOSS_AT=s (sim_degrade.py).
     say = lambda m: print(m, flush=True)
     monitor = failsafe.HealthMonitor(log=say)
-    watchdog = failsafe.Watchdog(bridge.publish_motors, timeout_s=1.0, log=say)
+    # 2026-11-02, OFFBOARD=1 with BRIDGE=px4 (PID/px4_bridge.py): your EKF + position/velocity
+    # loops fly the real/SITL PX4 vehicle through attitude setpoints. "Motors off" is the
+    # wrong reflex in the air there - every path that cuts motors in Gazebo-direct mode
+    # (watchdog, exception, FALLBACK) instead hands control back to PX4, which lands/holds.
+    offboard = getattr(bridge, "offboard", False)
+    if offboard:
+        motors_off = lambda *_: bridge.hand_back("watchdog: control loop silent")
+        if mission is not None and mission.override is not None:
+            say("OFFBOARD: this mission's rate/thrust override (acro) is not supported - attitude setpoints only")
+    else:
+        motors_off = bridge.publish_motors
+    watchdog = failsafe.Watchdog(motors_off, timeout_s=1.0, log=say)
+    origin = None          # OFFBOARD: (pos, yaw) at engagement - missions fly relative to it
+    controlling = not offboard
     nan_at = float(os.environ.get("SIM_NAN_AT", "0"))
     hang_at = float(os.environ.get("SIM_HANG_AT", "0"))
     nan_done = False
@@ -410,6 +435,8 @@ def main():
             ekf.P[0, 0] = float("nan")
             nan_done = True
         mission_setpoint = mission(mt) if mission is not None else {"pos": np.array([0.0, 0.0, 2.0]), "yaw": 0.0}
+        if origin is not None:
+            mission_setpoint = relative_setpoint(mission_setpoint, origin)
         mission_done = mission is not None and mt > mission.total
         if run_seconds and mt > run_seconds:
             print(f"RUN_END t={mt:.2f}", flush=True)
@@ -434,7 +461,38 @@ def main():
             continue
         backup = oracle_state(bridge, est_state) if monitor.mode == "FALLBACK" else None
         mode = monitor.update(now, ekf, est_state, mission_done, backup_state=backup)
+        if offboard and not controlling:
+            # before engagement: the EKF runs and logs, the controller waits (its integrators
+            # stay empty). After an override / hand-back / disarm: never command again - keep
+            # estimating and logging until PX4 has been disarmed for 2 s.
+            if bridge.ob_state in ("IDLE", "PRESTREAM", "MODE", "ARM"):
+                if bridge.offboard_tick(now, ready=mode == "NORMAL") == "ENGAGED":
+                    controlling = True
+                    origin = (np.array(est_state["pos"], float).copy(), cascade.yaw_from_quat(est_state["quat"]))
+                    start_t = last_t = now   # mission clock starts at engagement
+                    say(f"OFFBOARD: mission origin pos={np.round(origin[0], 2)} yaw={math.degrees(origin[1]):.0f}deg")
+            elif bridge.ob_state == "DONE" and bridge.px4_armed and now - disarm_t > 0.25:
+                # PX4 refused our disarm ("not landed" - our landing call came early): let
+                # PX4's own Land mode finish the touchdown instead of an offboard-loss failsafe.
+                # 0.25 s: PX4's reply takes milliseconds, and this must beat COM_OF_LOSS_T (0.5 s)
+                bridge.hand_back("disarm refused - PX4 finishes the landing")
+            elif not bridge.px4_armed:
+                disarm_t = disarm_t or now
+                if now - disarm_t > 2.0:
+                    print(f"MISSION_END {MISSION} t={mt:.2f} (offboard {bridge.ob_state})", flush=True)
+                    break
+            continue
+        if offboard and mode == "FALLBACK":
+            # our EKF is unusable: PX4's own estimator/controller takes over (failsafe.py)
+            bridge.hand_back(f"FALLBACK: {monitor.reason}")
+            controlling = False
+            continue
         if mode == "DISARMED":
+            if offboard:
+                bridge.disarm()
+                controlling = False
+                disarm_t = now
+                continue
             bridge.publish_motors(0.0, 0.0, 0.0, 0.0)
             if disarm_t is None:
                 disarm_t = now
@@ -454,8 +512,16 @@ def main():
         last_t = now
 
         thrust, roll_tau, pitch_tau, yaw_tau = c.step(setpoint, state, dt)
-        m1, m2, m3, m4 = cascade.mix(thrust, roll_tau, pitch_tau, yaw_tau, limits["motor_range"], frame=c.frame)
-        bridge.publish_motors(m1, m2, m3, m4)
+        if offboard:
+            # PX4 executes the attitude setpoint with its own inner loops; the cascade's
+            # rate-loop torques computed above are unused in this mode
+            if bridge.offboard_tick(now) != "ENGAGED":   # RC switch / PX4 failsafe took over
+                controlling = False
+                continue
+            bridge.publish_attitude(c._att_sp, thrust / cascade.VEL_Z_HOVER_THRUST_FF, now)
+        else:
+            m1, m2, m3, m4 = cascade.mix(thrust, roll_tau, pitch_tau, yaw_tau, limits["motor_range"], frame=c.frame)
+            bridge.publish_motors(m1, m2, m3, m4)
 
         i += 1
         if i % 30 == 0:
@@ -468,8 +534,11 @@ def main():
                   f"thrust={thrust:6.1f} tau=({roll_tau:6.1f},{pitch_tau:6.1f},{yaw_tau:6.1f}) "
                   f"pos=({est_state['pos'][0]:5.2f},{est_state['pos'][1]:5.2f},{est_state['pos'][2]:5.2f})"
                   + true_str(bridge), flush=True)
-    except BaseException:
-        bridge.publish_motors(0.0, 0.0, 0.0, 0.0)  # any crash in the loop: motors off, then re-raise
+    except BaseException as e:
+        if offboard:
+            bridge.hand_back(f"exception in the control loop: {e!r}")   # PX4 takes over, then re-raise
+        else:
+            bridge.publish_motors(0.0, 0.0, 0.0, 0.0)  # any crash in the loop: motors off, then re-raise
         raise
     finally:
         watchdog.stop()

@@ -39,6 +39,28 @@ from pymavlink import mavutil
 EARTH_RADIUS = 6371000.0
 T_NED2ENU = np.array([[0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, -1.0]])
 FRD2FLU = np.array([1.0, -1.0, -1.0])
+
+# ---- OFFBOARD=1 (2026-11-02): your EKF + position/velocity loops fly, PX4's attitude/rate
+# loops execute. run_sim.py sends one attitude quaternion + collective thrust per control
+# tick (SET_ATTITUDE_TARGET); PX4 tracks it with its own (tuned) inner loops. Your cascade's
+# attitude/rate loops and mixer are not used in this mode - motor-level control comes later.
+#
+# Engagement, all from the main loop (offboard_tick): stream neutral setpoints PRESTREAM_S
+# (PX4 refuses OFFBOARD without a live stream) -> request OFFBOARD -> arm -> ENGAGED.
+# After that, if PX4 leaves OFFBOARD for any reason we didn't ask for (RC mode switch, PX4
+# failsafe, low battery), we go to OVERRIDE and never send a command again - the pilot or
+# PX4 always wins. Setpoints are only ever sent from the main loop, so a hung loop stops
+# the stream and PX4's own offboard-loss failsafe (COM_OF_LOSS_T) takes over.
+OFFBOARD = os.environ.get("OFFBOARD") == "1"
+PX4_MAIN_POSCTL, PX4_MAIN_AUTO, PX4_MAIN_OFFBOARD = 3, 4, 6
+PX4_AUTO_LOITER, PX4_AUTO_LAND = 3, 6
+PRESTREAM_S = 1.0
+ENGAGE_TIMEOUT_S = 15.0
+SETPOINT_HZ = 50.0
+MAX_THRUST = 0.95
+# where control goes when WE give it up (FALLBACK, watchdog, exception): PX4 lands by
+# itself ("land", default) or holds position ("hold") for the pilot to take over
+FALLBACK_MODES = {"land": (PX4_MAIN_AUTO, PX4_AUTO_LAND), "hold": (PX4_MAIN_AUTO, PX4_AUTO_LOITER)}
 MSG_RATES_HZ = {"HIGHRES_IMU": 250, "GPS_RAW_INT": 10, "ATTITUDE_QUATERNION": 50, "LOCAL_POSITION_NED": 50}
 MSG_IDS = {"HIGHRES_IMU": 105, "GPS_RAW_INT": 24, "ATTITUDE_QUATERNION": 31, "LOCAL_POSITION_NED": 32}
 HIGHRES_ACC_GYRO = 0x3F    # fields_updated bits 0-5
@@ -71,18 +93,36 @@ def _R_to_quat(R):
     return q / np.linalg.norm(q)
 
 
+def _yaw_quat(yaw):
+    return (math.cos(yaw / 2), 0.0, 0.0, math.sin(yaw / 2))
+
+
+def thrust_command(rel, hover):
+    """collective thrust for SET_ATTITUDE_TARGET from the cascade's thrust.
+    rel = cascade thrust / VEL_Z_HOVER_THRUST_FF - the cascade works in Gazebo rotor speed
+    (rad/s), and rotor force goes with speed squared, so rel**2 is the force as a fraction
+    of hover force. PX4 treats its normalized thrust as proportional to force (that's what
+    THR_MDL_FAC calibrates), so the command is hover * rel**2. A wrong `hover` shows up as
+    a steady vel_z error that the vel_z integrator trims out."""
+    return float(np.clip(hover * max(rel, 0.0) ** 2, 0.0, MAX_THRUST))
+
+
 class _NoDegrade:
     # run_sim prints bridge.degrade.describe(); sensors here are real
     active = realistic = False
     latency = 0.0
 
     def describe(self):
+        if OFFBOARD:
+            return "SENSORS: PX4 over MAVLink - OFFBOARD: your EKF + outer loops command PX4's attitude controller"
         return "SENSORS: PX4 over MAVLink (real data) - SHADOW MODE, motor commands are NOT sent"
 
 
 class Px4Bridge:
-    shadow = True            # run_sim: never let the failsafe end the run / never send motors
     use_timestamps = True    # run_sim: queue IMU samples, EKF dt from PX4's stamps
+    # shadow (run_sim: never let the failsafe end the run / never send motors) unless OFFBOARD=1
+    shadow = not OFFBOARD
+    offboard = OFFBOARD
 
     def __init__(self, url=None, baud=None, startup_timeout=60.0):
         url = url or os.environ.get("PX4_URL", "udpin:0.0.0.0:14540")
@@ -109,8 +149,24 @@ class Px4Bridge:
         self._ref_q = self._ref_pos = self._ref_stamp = None
         self._motor_warned = False
         self.counts = collections.Counter()
+        self._send_lock = threading.Lock()   # the watchdog thread may send (hand_back) too
+        self.px4_armed = False
+        self.px4_main = self.px4_sub = None
+        self.ob_state = "IDLE"
+        self._ob_t0 = self._ob_start = self._ob_retry = None
+        self._last_sp_t = self._last_hb_t = -math.inf
         self._request_streams()
         self.gps_latency = self._gps_latency()
+        if OFFBOARD:
+            # hover thrust: OFFBOARD_HOVER_THR (measure it - PX4 logs hover_thrust_estimate in
+            # every hover), else PX4's MPC_THR_HOVER. SITL x500: true hover is ~0.71 (757 rad/s
+            # on gz's linear 150..1000 rad/s command map) while MPC_THR_HOVER defaults to 0.6.
+            env = os.environ.get("OFFBOARD_HOVER_THR")
+            self.hover_thrust = float(env) if env else (self._read_param("MPC_THR_HOVER") or 0.5)
+            self.fallback_mode = FALLBACK_MODES[os.environ.get("OFFBOARD_FALLBACK", "land")]
+            print(f"PX4 bridge: OFFBOARD - hover thrust {self.hover_thrust:.3f} "
+                  f"({'OFFBOARD_HOVER_THR' if env else 'MPC_THR_HOVER'}), "
+                  f"fallback {os.environ.get('OFFBOARD_FALLBACK', 'land')}", flush=True)
         self._stop = False
         threading.Thread(target=self._reader, daemon=True).start()
         self.mag_reference = self._mag_reference(startup_timeout)
@@ -124,18 +180,25 @@ class Px4Bridge:
                                           mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0,
                                           MSG_IDS[name], int(1e6 / hz), 0, 0, 0, 0, 0)
 
-    def _gps_latency(self):
-        if os.environ.get("EKF_GPS_LATENCY_MS"):
-            return float(os.environ["EKF_GPS_LATENCY_MS"]) / 1000.0
-        # parameters live on the autopilot component (1), whatever component sent the first heartbeat
-        for _ in range(3):
+    def _read_param(self, name, tries=3):
+        # parameters live on the autopilot component (1), whatever component sent the first
+        # heartbeat. Only before the reader thread starts (both would read the link).
+        for _ in range(tries):
             self._m.mav.param_request_read_send(self._m.target_system, mavutil.mavlink.MAV_COMP_ID_AUTOPILOT1,
-                                                b"EKF2_GPS_DELAY", -1)
+                                                name.encode(), -1)
             t_end = time.time() + 2
             while time.time() < t_end:
                 msg = self._m.recv_match(type="PARAM_VALUE", blocking=True, timeout=0.5)
-                if msg is not None and str(msg.param_id).strip("\x00") == "EKF2_GPS_DELAY":
-                    return float(msg.param_value) / 1000.0
+                if msg is not None and str(msg.param_id).strip("\x00") == name:
+                    return float(msg.param_value)
+        return None
+
+    def _gps_latency(self):
+        if os.environ.get("EKF_GPS_LATENCY_MS"):
+            return float(os.environ["EKF_GPS_LATENCY_MS"]) / 1000.0
+        delay_ms = self._read_param("EKF2_GPS_DELAY")
+        if delay_ms is not None:
+            return delay_ms / 1000.0
         # PX4 <= 1.15 has EKF2_GPS_DELAY; newer PX4 (e.g. 1.18-dev) dropped it and time-stamps GPS
         # samples itself - set EKF_GPS_LATENCY_MS to your receiver's latency if you know it
         print("PX4 bridge: no EKF2_GPS_DELAY on this PX4 (newer versions dropped it) - assuming 110 ms; "
@@ -162,7 +225,9 @@ class Px4Bridge:
     # ---- receive -----------------------------------------------------------------------
     def _reader(self):
         handlers = {"HIGHRES_IMU": self._on_imu, "GPS_RAW_INT": self._on_gps,
-                    "ATTITUDE_QUATERNION": self._on_att, "LOCAL_POSITION_NED": self._on_pos}
+                    "ATTITUDE_QUATERNION": self._on_att, "LOCAL_POSITION_NED": self._on_pos,
+                    "HEARTBEAT": self._on_heartbeat, "STATUSTEXT": self._on_statustext,
+                    "COMMAND_ACK": self._on_ack}
         while not self._stop:
             msg = self._m.recv_match(type=list(handlers), blocking=True, timeout=0.5)
             if msg is None:
@@ -217,6 +282,24 @@ class Px4Bridge:
     def _on_pos(self, msg):
         self._ref_pos = tuple(T_NED2ENU @ np.array([msg.x, msg.y, msg.z]))
 
+    def _on_heartbeat(self, msg):
+        # PX4's own heartbeat only (a GCS on the same link sends them too)
+        if msg.get_srcComponent() != mavutil.mavlink.MAV_COMP_ID_AUTOPILOT1 or msg.type == mavutil.mavlink.MAV_TYPE_GCS:
+            return
+        self.px4_armed = bool(msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
+        # PX4 custom_mode: bits 16-23 main mode, 24-31 sub mode
+        self.px4_main, self.px4_sub = (msg.custom_mode >> 16) & 0xFF, (msg.custom_mode >> 24) & 0xFF
+
+    def _on_statustext(self, msg):
+        # PX4's own explanations ("Arming denied: ...", "Failsafe activated", ...)
+        if OFFBOARD:
+            print(f"PX4: {msg.text}", flush=True)
+
+    def _on_ack(self, msg):
+        if OFFBOARD and msg.command in (mavutil.mavlink.MAV_CMD_DO_SET_MODE, mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM) \
+                and msg.result != mavutil.mavlink.MAV_RESULT_ACCEPTED:
+            print(f"PX4 bridge: command {msg.command} rejected (result {msg.result})", flush=True)
+
     # ---- gz_bridge interface -------------------------------------------------------------
     def wait_for_imu(self, timeout=0.1):
         got = self._imu_event.wait(timeout)
@@ -268,10 +351,123 @@ class Px4Bridge:
         return self._ref_stamp
 
     def publish_motors(self, m1, m2, m3, m4):
-        # SHADOW MODE: never command the vehicle from here
+        # never commands the vehicle - shadow mode, and OFFBOARD sends attitude setpoints
+        # (publish_attitude) instead of motor speeds
         if not self._motor_warned:
-            print("PX4 bridge (shadow): motor commands are computed and logged, NOT sent", flush=True)
+            print("PX4 bridge: motor commands are computed and logged, NOT sent", flush=True)
             self._motor_warned = True
+
+    # ---- OFFBOARD ------------------------------------------------------------------------
+    def _command(self, cmd, *params):
+        p = list(params) + [0.0] * (7 - len(params))
+        with self._send_lock:
+            self._m.mav.command_long_send(self._m.target_system, mavutil.mavlink.MAV_COMP_ID_AUTOPILOT1, cmd, 0, *p)
+
+    def _set_mode(self, main, sub=0):
+        self._command(mavutil.mavlink.MAV_CMD_DO_SET_MODE, mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, main, sub)
+
+    def _send_attitude(self, q_enu_flu, thrust):
+        # this project's ENU world / FLU body -> PX4's NED / FRD (both maps are their own inverse)
+        q = _R_to_quat(T_NED2ENU @ _quat_to_R(q_enu_flu) @ np.diag(FRD2FLU))
+        ignore_rates = 0b111   # type_mask: body roll/pitch/yaw rates not set -> PX4 tracks q
+        with self._send_lock:
+            self._m.mav.set_attitude_target_send(int(time.monotonic() * 1000) & 0xFFFFFFFF, self._m.target_system,
+                                                 mavutil.mavlink.MAV_COMP_ID_AUTOPILOT1, ignore_rates,
+                                                 [float(x) for x in q], 0.0, 0.0, 0.0, float(thrust))
+
+    def _heartbeat(self, now):
+        # 1 Hz "companion computer alive", from the main loop only (a hung loop goes silent)
+        if now - self._last_hb_t >= 1.0:
+            with self._send_lock:
+                self._m.mav.heartbeat_send(mavutil.mavlink.MAV_TYPE_ONBOARD_CONTROLLER,
+                                           mavutil.mavlink.MAV_AUTOPILOT_INVALID, 0, 0, mavutil.mavlink.MAV_STATE_ACTIVE)
+            self._last_hb_t = now
+
+    def _neutral(self):
+        # level at PX4's current heading, zero thrust: what the pre-engage stream asks for
+        yaw = 0.0
+        if self._ref_q is not None:
+            w, x, y, z = self._ref_q
+            yaw = math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))
+        return _yaw_quat(yaw), 0.0
+
+    def offboard_tick(self, now, ready=True):
+        """engagement state machine - call every main-loop iteration; returns the state.
+        IDLE -> PRESTREAM -> MODE (OFFBOARD requested) -> ARM -> ENGAGED, then OVERRIDE if PX4
+        leaves OFFBOARD/disarms without us asking. FAILED = didn't engage in ENGAGE_TIMEOUT_S.
+        ready=False holds in IDLE (run_sim: only engage while the health monitor is NORMAL)."""
+        self._heartbeat(now)
+        s = self.ob_state
+        if s == "IDLE" and ready:
+            self._ob_start = self._ob_t0 = now
+            self.ob_state = "PRESTREAM"
+            print("OFFBOARD: streaming neutral setpoints", flush=True)
+        elif s == "PRESTREAM" and now - self._ob_t0 >= PRESTREAM_S:
+            self._set_mode(PX4_MAIN_OFFBOARD)
+            self._ob_retry, self.ob_state = now, "MODE"
+            print("OFFBOARD: requesting OFFBOARD mode", flush=True)
+        elif s == "MODE":
+            if self.px4_main == PX4_MAIN_OFFBOARD:
+                self._command(mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 1)
+                self._ob_retry, self.ob_state = now, "ARM"
+                print("OFFBOARD: in OFFBOARD, arming", flush=True)
+            elif now - self._ob_retry > 1.0:
+                self._set_mode(PX4_MAIN_OFFBOARD)
+                self._ob_retry = now
+        elif s == "ARM":
+            if self.px4_armed and self.px4_main == PX4_MAIN_OFFBOARD:
+                self.ob_state = "ENGAGED"
+                print("OFFBOARD: ENGAGED - your controller is flying", flush=True)
+            elif self.px4_main != PX4_MAIN_OFFBOARD:
+                self.ob_state = "MODE"   # PX4 dropped out of OFFBOARD before arming - ask again
+                self._ob_retry = -math.inf
+            elif now - self._ob_retry > 1.0:
+                self._command(mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 1)
+                self._ob_retry = now
+        elif s == "ENGAGED" and (self.px4_main != PX4_MAIN_OFFBOARD or not self.px4_armed):
+            self.ob_state = "OVERRIDE"
+            print(f"OFFBOARD: PX4 left OFFBOARD on its own (mode {self.px4_main}.{self.px4_sub}, "
+                  f"armed={self.px4_armed}) - pilot/PX4 has control, sending nothing more", flush=True)
+        if self.ob_state in ("PRESTREAM", "MODE", "ARM"):
+            if now - self._ob_start > ENGAGE_TIMEOUT_S:
+                self.ob_state = "FAILED"
+                print("OFFBOARD: FAILED to engage - disarming", flush=True)
+                self._command(mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0)
+            elif now - self._last_sp_t >= 1.0 / SETPOINT_HZ:
+                self._send_attitude(*self._neutral())
+                self._last_sp_t = now
+        return self.ob_state
+
+    def publish_attitude(self, q_enu_flu, thrust_rel, now):
+        """the cascade's attitude setpoint (ENU/FLU quat) + thrust relative to hover (see
+        thrust_command), rate-limited to SETPOINT_HZ. Only while ENGAGED - never after an
+        override or hand-back."""
+        if self.ob_state != "ENGAGED":
+            return
+        self._heartbeat(now)
+        if now - self._last_sp_t >= 1.0 / SETPOINT_HZ:
+            self._send_attitude(q_enu_flu, thrust_command(thrust_rel, self.hover_thrust))
+            self._last_sp_t = now
+
+    def hand_back(self, reason):
+        """give control to PX4 (FALLBACK, watchdog, exception): switch to the fallback mode
+        and stop sending. Idempotent, safe from the watchdog thread."""
+        if self.ob_state not in ("PRESTREAM", "MODE", "ARM", "ENGAGED", "DONE"):
+            return
+        self.ob_state = "HANDED_BACK"
+        main, sub = self.fallback_mode
+        print(f"OFFBOARD: handing control back to PX4 (mode {main}.{sub}): {reason}", flush=True)
+        for _ in range(3):   # UDP/serial can drop one; PX4 ignores repeats
+            self._set_mode(main, sub)
+
+    def disarm(self):
+        """after our own landing. PX4 refuses a (non-forced) disarm in the air, so a wrong
+        'landed' decision can't drop the vehicle - the stream stops and PX4's offboard-loss
+        failsafe lands it instead."""
+        if self.ob_state == "ENGAGED":
+            self.ob_state = "DONE"
+            self._command(mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0)
+            print("OFFBOARD: landed - disarm requested", flush=True)
 
     def close(self):
         self._stop = True

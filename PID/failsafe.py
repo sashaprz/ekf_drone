@@ -165,6 +165,7 @@ class Watchdog:
             time.sleep(0.05)
             if time.time() - self._last > self._timeout:
                 if not self.tripped:
-                    self._log(f"WATCHDOG: control loop silent for {time.time() - self._last:.2f} s - motors cut")
+                    self._log(f"WATCHDOG: control loop silent for {time.time() - self._last:.2f} s - motors off "
+                              f"(OFFBOARD: control handed back to PX4)")
                     self.tripped = True
                 self._pub(0.0, 0.0, 0.0, 0.0)
