@@ -102,6 +102,32 @@ this tests timing and the data link, which Stage 1 can't.
 
 Only after Stage 1–2 show your EKF tracking EKF2 closely over many flights.
 
+**Stage 3a — attitude-setpoint offboard: implemented 2026-11-02, passing in SITL.**
+`OFFBOARD=1 BRIDGE=px4 PX4_URL=... OFFBOARD_HOVER_THR=<hover> MISSION=hover python3 run_sim.py`
+- Your EKF + position/velocity loops send an attitude quaternion + collective thrust
+  (`SET_ATTITUDE_TARGET`, 50 Hz); PX4's own attitude/rate loops fly it. Your attitude/rate
+  loops and mixer are unused in this mode.
+- Engages itself: neutral setpoint stream 1 s → OFFBOARD → arm. If PX4 leaves OFFBOARD for any
+  reason it didn't request (RC switch, PX4 failsafe), it stops sending for good (OVERRIDE).
+- Missions fly relative to the position/heading at engagement.
+- Thrust = `OFFBOARD_HOVER_THR × (cascade thrust / 757)²` - set the hover value from a PX4
+  hover log (`hover_thrust_estimate`); SITL x500 is 0.71 (PX4's MPC_THR_HOVER says 0.6).
+- Failsafes hand control back to PX4 instead of cutting motors: watchdog, exception, FALLBACK →
+  Auto.Land (`OFFBOARD_FALLBACK=hold` for Hold); our "landed" → disarm, which PX4 refuses in the
+  air (then PX4's Land finishes); a dead process → PX4's `COM_OF_LOSS_T` failsafe.
+- PX4 params: `COM_OF_LOSS_T=0.5`, `COM_OBL_RC_ACT=4` (Land; on the real drone with RC you may
+  prefer 0 = Position), RC kill switch + an RC mode switch with Position mode on it.
+- SITL regression (run before every real flight), inside WSL:
+  `bash testing/suite/px4_offboard_flight.sh testing/data/offboard/hover_none.csv hover none`
+  then `python3 testing/suite/check_offboard.py testing/data/offboard/hover_none.csv none`;
+  faults `hang`, `nan`, `kill` prove each hand-back path. 2026-11-02: all four PASS
+  (hover z 0.15 m / xy 0.08 m rms vs setpoint).
+- **Open, found by this test:** PX4 SITL's reported field strength steps +14 % mid-climb; your
+  EKF's mag gate then rejects every reading (d² ≈ 33 vs 11.3) and heading drifts on the gyro
+  (±20° over 80 s, PX4 steady). Hover doesn't care; moving missions will push off-course.
+
+**Stage 3b — motor-level offboard (not started):**
+
 - PX4 **offboard mode** with actuator-level setpoints (`ActuatorMotors` via uXRCE-DDS) so your
   controller and mixer run on the Pi; motor command mapping (Gazebo rad/s → normalized
   thrust) needs a thrust curve or at least the measured hover throttle; verify motor order and
